@@ -161,11 +161,12 @@
               <button id="simZoomOutBtn" class="icon-button" type="button" title="缩小仿真图" aria-label="缩小仿真图">−</button>
               <span id="simZoomValue" class="zoom-readout">100%</span>
               <button id="simZoomInBtn" class="icon-button" type="button" title="放大仿真图" aria-label="放大仿真图">+</button>
+              <button id="simFitBtn" class="small-button" type="button" title="完整显示仿真图" aria-label="适配仿真图">适配</button>
               <button id="simExpandBtn" class="icon-button" type="button" title="放大到全屏区域" aria-label="放大到全屏区域">⛶</button>
               <button id="pidShowBtn" class="small-button hidden" type="button" title="显示 PID 计算过程">显示 PID</button>
             </div>
           </div>
-          <div class="process-viewport">
+          <div class="process-viewport" title="使用 + / − 缩放，放大后按住图形拖动；点击适配可查看全图">
             <div id="simWarning" class="sim-warning hidden"></div>
             <div id="processVisual" class="process-visual">
               <div id="processWatermark" class="sim-watermark hidden"></div>
@@ -765,6 +766,7 @@
 
   <div id="toast" class="toast hidden"></div>
   <script src="/vendor/xlsx.full.min.js"></script>
+  <script src="/simulation-view.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

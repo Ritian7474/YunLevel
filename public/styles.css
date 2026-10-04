@@ -355,7 +355,7 @@ td .mini { color: var(--muted); }
   position: relative; isolation: isolate; min-width: 1540px; min-height: 470px; padding: 34px 26px 24px;
   display: flex; align-items: center; justify-content: center; gap: 8px;
   border: 0; border-radius: 0; background: transparent; overflow: visible;
-  transition: transform .16s ease;
+  transition: none;
   will-change: transform;
 }
 .process-visual::before {
@@ -1258,7 +1258,12 @@ body.sim-expanded { overflow: hidden; }
 .process-viewport {
   overflow: hidden;
   margin-bottom: 4px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
+.process-viewport.panning { cursor: grabbing; }
+.process-viewport.panning .process-visual { transition: none; }
 .hx-schematic {
   overflow: hidden;
   margin-bottom: 8px;
@@ -1402,3 +1407,16 @@ body.sim-expanded { overflow: hidden; }
 .score-fields { display: none; }
 .score-fields.active { display: block; }
 .score-fields.active .score-config-grid { margin-top: 4px; }
+
+/* The camera scales a stable world rectangle, independent of panel layout. */
+.process-viewport > .process-visual {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1100px;
+  min-width: 1100px;
+  height: 470px;
+  min-height: 470px;
+  transform-origin: 0 0;
+}
+.tank-schematic { flex: 1; min-width: 0; }

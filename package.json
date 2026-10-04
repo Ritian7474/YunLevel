@@ -8,6 +8,8 @@
     "start": "node server/server.js",
     "prestart": "node scripts/ensure-engine.js",
     "build:engine": "node scripts/build-engine.js",
+    "check:frontend": "node --check public/simulation-view.js && node --check public/app.js",
+    "test:frontend": "npm run check:frontend && node --test scripts/simulation-view.test.js",
     "check": "node --check server/config.js && node --check server/models.js && node --check server/storage.js && node --check server/roster-store.js && node --check server/engine-session.js && node --check server/snapshot-store-v2.js && node --check server/zip-builder.js && node --check server/server.js && node --check public/app.js"
 
   },
