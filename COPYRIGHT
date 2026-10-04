@@ -1,0 +1,19 @@
+YunLevel — 三级液位 / 换热器 PID 云仿真
+
+Copyright (C) 2026 南宁职业技术大学215工作室
+
+本工程以 GNU General Public License 第 3 版（或更新版本）发布，
+完整条款见同目录下的 LICENSE 文件。
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.

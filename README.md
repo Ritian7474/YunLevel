@@ -193,6 +193,7 @@ PID 计算过程、单罐/系统评分、评分结束时间、教师看板与记
 本项目以 **GNU GPL-3.0**（或更新版本）发布，版权归 **南宁职业技术大学215工作室** 所有。
 
 - 完整条款：[LICENSE](LICENSE)
+- 版权声明：[COPYRIGHT](COPYRIGHT)
 - 第三方组件声明：[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
 
 你可以自由使用、修改、再分发本项目，**但衍生作品必须以同样的 GPL 条款开源**，不能闭源独吞。
