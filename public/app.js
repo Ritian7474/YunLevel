@@ -14,6 +14,7 @@ const app = {
   me: null,
   view: 'control',
   state: null,
+  loopSelection: new ControlWorkspace.SelectionStore(),
   history: {},
   streams: { level: new Set(['h1', 'h2', 'h3', 'sp1', 'sp2', 'sp3']), flow: new Set(['qin', 'q12', 'q23', 'qout']), valve: new Set(['pump', 'fv101', 'fv102', 'fv103', 'fv104']) },
   simEventSource: null,
@@ -36,7 +37,7 @@ const app = {
   showSecondaryLabels: true,
   schemeMode: null,
   simDrag: null,
-  pidPanelVisible: true,
+  pidPanelVisible: false,
   historyClock: { offset: 0, lastRawT: null, lastDisplayT: null },
   cloudSettings: { allowStudentUpload: false, updatedAt: null },
   cloudProjects: [],
@@ -199,12 +200,12 @@ const MODEL_SPECS = {
       { id: 'fv104Input', key: 'fv104', label: 'FV104 手操 %', cmd: 'VALVE', mv: 3, valueOf: 'fv104cmd' },
     ],
     pvCatalog: [
-      { value: 0, label: 'LI101 1#罐液位', unit: '%' },
-      { value: 1, label: 'LI102 2#罐液位', unit: '%' },
-      { value: 2, label: 'LI103 3#罐液位', unit: '%' },
-      { value: 3, label: 'FI101 给水流量', unit: 'L/min', flowOnly: true },
-      { value: 4, label: 'FI102 级间流量1', unit: 'L/min', flowOnly: true },
-      { value: 5, label: 'FI103 级间流量2', unit: 'L/min', flowOnly: true },
+      { value: 0, label: 'LI101 1#罐液位', unit: '%', stateKey:'h1' },
+      { value: 1, label: 'LI102 2#罐液位', unit: '%', stateKey:'h2' },
+      { value: 2, label: 'LI103 3#罐液位', unit: '%', stateKey:'h3' },
+      { value: 3, label: 'FI101 给水流量', unit: 'L/min', flowOnly: true, stateKey:'qin' },
+      { value: 4, label: 'FI102 级间流量1', unit: 'L/min', flowOnly: true, stateKey:'q12' },
+      { value: 5, label: 'FI103 级间流量2', unit: 'L/min', flowOnly: true, stateKey:'q23' },
     ],
     mvCatalog: [
       { value: 0, label: 'FV101 给水总阀' },
@@ -300,8 +301,8 @@ const MODEL_SPECS = {
       { id: 'inletTempInput', key: 'ti1103', label: 'TI1103 入口蒸汽 ℃', cmd: 'INLET', valueOf: 'ti1103', min: 250, max: 650, step: 1 },
     ],
     pvCatalog: [
-      { value: 0, label: 'TI1104 出口温度', unit: '℃' },
-      { value: 1, label: 'FI1105 蒸汽流量', unit: 'kg/s', flowOnly: true },
+      { value: 0, label: 'TI1104 出口温度', unit: '℃', stateKey:'ti1104' },
+      { value: 1, label: 'FI1105 蒸汽流量', unit: 'kg/s', flowOnly: true, stateKey:'fi1105' },
     ],
     mvCatalog: [
       { value: 0, label: 'FV1102 冷却水阀' },
@@ -455,11 +456,27 @@ function metricElementId(key) {
 }
 
 function renderModelMetrics(state = app.state) {
+  renderCriticalReadouts(state);
   if (!state) return;
   for (const tag of modelSpec().parameterTags || []) {
     const el = $(metricElementId(tag.key));
-    if (el) el.textContent = number(state[tag.key], tag.digits ?? 2);
+    if (el) {
+      const reading = ControlWorkspace.measurementValue(tag, state[tag.key]);
+      el.textContent = reading.value + (reading.unit ? ' ' + reading.unit : '');
+    }
   }
+}
+
+function renderCriticalReadouts(state) {
+  const strip = $('criticalReadouts');
+  if (!strip) return;
+  const rows = ControlWorkspace.criticalReadouts(workspaceModel(), modelSpec().parameterTags, state);
+  const signature = JSON.stringify(rows.map(({ key, label, unit }) => [key, label, unit]));
+  if (strip.dataset.signature !== signature) {
+    strip.dataset.signature = signature;
+    strip.innerHTML = rows.map(row => '<div><span>' + escapeHtml(row.label) + '</span><p><b data-critical="' + escapeAttr(row.key) + '">—</b><span class="readout-unit">' + escapeHtml(row.unit) + '</span></p></div>').join('');
+  }
+  rows.forEach(row => { strip.querySelector(`[data-critical="${row.key}"]`).textContent = row.value; });
 }
 
 function setSelectOptions(select, items, preferredValue, selectedValue) {
@@ -491,6 +508,7 @@ function renderManualFields() {
 }
 
 function renderMetricGrid() {
+  renderCriticalReadouts(null);
   const grid = $('metricGrid');
   if (!grid) return;
   grid.innerHTML = (modelSpec().parameterTags || []).map((tag) => '<div><span>' + escapeHtml(tag.label.replace(/\([^)]*\)$/, '')) + '</span><b id="' + escapeAttr(metricElementId(tag.key)) + '">-</b></div>').join('');
@@ -728,6 +746,10 @@ function setConnection(ok, text) {
 }
 
 function showLogin(error = '') {
+  app.processDevices?.close();
+  app.loopSelection.clear();
+  $('loopCards')?.replaceChildren();
+  if ($('loopCards')) delete $('loopCards').dataset.signature;
   switchView('control');
   app.selectedStudent = null;
   app.me = null;
@@ -761,6 +783,7 @@ function showApp() {
 }
 
 function switchView(view) {
+  app.processDevices?.close();
   if (view === 'score') {
     const score = app.state?.score || {};
     if (score.active && !score.finished) {
@@ -769,6 +792,10 @@ function switchView(view) {
     }
   }
   app.view = view;
+  const activeView = $(`view${view[0].toUpperCase()}${view.slice(1)}`);
+  if (activeView) activeView.tabIndex = -1;
+  const skipLink = document.querySelector('.skip-link');
+  if (skipLink && activeView) skipLink.href = '#' + activeView.id;
   document.querySelectorAll('#mainTabs .tab').forEach((tab) => {
     tab.classList.toggle('active', tab.dataset.view === view);
   });
@@ -1013,6 +1040,12 @@ function renderTankPid(state) {
   const levels = [state.h1, state.h2, state.h3];
   levels.forEach((lv, i) => {
     const lvNum = Math.max(0, Math.min(100, Number(lv) || 0));
+    const svgFill = $(`tankSvgFill${i + 1}`);
+    if (svgFill) {
+      const geometry = ControlWorkspace.tankLevelGeometry(lv);
+      svgFill.setAttribute('y', String(geometry.y));
+      svgFill.setAttribute('height', String(geometry.height));
+    }
     const fill = $(`tank${i + 1}Fill`);
     if (fill) {
       fill.style.height = `${lvNum}%`;
@@ -1189,6 +1222,7 @@ function updateState(state) {
   renderScore(state);
   updateScoreTabAccess();
   renderStudentCloudStatus();
+  app.processDevices?.refresh();
   if (app.view === 'curves') scheduleStudentCharts();
 }
 
@@ -1251,6 +1285,119 @@ function loopStructureSignature(loops, cascades) {
   ].join('|');
 }
 
+function workspaceModel() { return app.me?.model || 'tank'; }
+
+function workspaceSelected(kind, index) {
+  const selected = app.loopSelection.current(workspaceModel());
+  return selected?.kind === kind && selected.index === index;
+}
+
+function renderLoopWorkspace(loops, cascades) {
+  const items = ControlWorkspace.entries(loops, cascades);
+  const model = workspaceModel();
+  const selected = app.loopSelection.update(model, items);
+  const list = $('loopList');
+  const signature = items.map(item => item.key).join('|');
+  if (list.dataset.signature !== `${model}|${signature}`) {
+    list.dataset.signature = `${model}|${signature}`;
+    list.replaceChildren();
+    items.forEach(item => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.workspaceSelect = item.key;
+      button.innerHTML = '<span class="loop-list-top"><b></b><span class="loop-list-mode"></span></span><span class="loop-list-path"></span><span class="loop-list-pv"></span>';
+      button.onclick = () => {
+        const previous = app.loopSelection.current(model)?.key;
+        app.loopSelection.select(model, item.key);
+        if (app.state) {
+          renderLoops(app.state);
+          renderPidProcess(app.state);
+        }
+        app.workspaceMotion.selection(previous, item.key, $('loopCards').querySelector('.loop-card:not(.hidden)'));
+        app.processDevices?.selectLoop(item.key);
+      };
+      list.appendChild(button);
+    });
+    if (!items.length) list.innerHTML = '<span class="muted small">暂无回路，展开“搭建回路”添加。</span>';
+  }
+  items.forEach(item => {
+    const button = Array.from(list.children).find(el => el.dataset.workspaceSelect === item.key);
+    if (!button) return;
+    const value = item.value;
+    button.setAttribute('aria-pressed', String(selected?.key === item.key));
+    button.querySelector('b').textContent = `${item.kind === 'loop' ? '单回路' : '串级'} ${item.index + 1}`;
+    button.querySelector('.loop-list-mode').textContent = item.kind === 'loop'
+      ? `${value.manual ? '手动' : '自动'} / ${value.action > 0 ? '正作用' : '反作用'}`
+      : `${value.outerManual ? '主环手动' : '主环自动'} / ${value.innerManual ? '副环手动' : '副环自动'}`;
+    button.querySelector('.loop-list-path').textContent = item.kind === 'loop'
+      ? `${mvName(value.mv)} → ${pvName(value.pv)}`
+      : `${mvName(value.mv)} → ${pvName(value.inner)} → ${pvName(value.outer)}`;
+    button.querySelector('.loop-list-pv').textContent = item.kind === 'loop'
+      ? `PV ${loopPvText(value)}`
+      : `主环 ${cascadePvText(value, 'outer')} · 副环 ${cascadePvText(value, 'inner')}`;
+  });
+  $('loopCards').querySelectorAll('[data-loop-card],[data-casc-card]').forEach(card => {
+    const loop = card.dataset.loopCard;
+    const active = loop !== undefined ? workspaceSelected('loop', Number(loop)) : workspaceSelected('casc', Number(card.dataset.cascCard));
+    card.classList.toggle('hidden', !active);
+  });
+  $('loopWorkspaceSelection').textContent = selected
+    ? `共 ${items.length} 个回路 · 正在编辑${selected.kind === 'loop' ? '单回路' : '串级'} ${selected.index + 1}`
+    : '尚未搭建回路';
+}
+
+function wireControlWorkspace() {
+  app.workspaceMotion = WorkspaceMotion.create(document);
+  app.parameterFeedback = ParameterFeedback.bind(document, { motion:app.workspaceMotion });
+  const deviceContext = () => ({ model:workspaceModel(), state:app.state, account:app.me, view:app.view,
+    selectedKey:app.loopSelection.current(workspaceModel())?.key, manualTargets:manualTargets(),
+    pvUnit:pv => pvCatalogItem(pv).unit || '',
+    entries:ControlWorkspace.entries(app.state?.loops || [], Number(app.state?.mode) === 1 ? app.state?.cascades || [] : []) });
+  const selectDeviceLoop = key => {
+    const previous = app.loopSelection.current(workspaceModel())?.key;
+    app.loopSelection.select(workspaceModel(), key);
+    if (app.state) { renderLoops(app.state); renderPidProcess(app.state); }
+    app.workspaceMotion.selection(previous, key, $('loopCards').querySelector('.loop-card:not(.hidden)'));
+  };
+  app.processDevices = ProcessDevices.bind(document, {
+    getContext:deviceContext,
+    controls:ProcessDeviceControls.create({ document, getContext:deviceContext, send:sendCommand,
+      feedback:app.parameterFeedback, policy:parameterInputPolicy }),
+    select:selectDeviceLoop,
+    inspect:key => { selectDeviceLoop(key); $('loopWorkspace').scrollIntoView({ block:'nearest' });
+      $('loopCards').querySelector('.loop-card:not(.hidden) input')?.focus({ preventScroll:true }); },
+    build:device => {
+      document.querySelector('[data-control-tab="loops"]')?.click();
+      // Select the actual tab by its panel, keeping the existing builder command.
+      $('manualControls').classList.add('hidden'); $('loopLibrary').classList.remove('hidden');
+      document.querySelectorAll('[data-control-tab]').forEach(tab => tab.setAttribute('aria-pressed', String(tab.dataset.controlTab !== 'manual')));
+      $('loopBuilder').open = true; $('buildPv').value = String(device.pv);
+      if (device.mv !== undefined) $('buildMv').value = String(device.mv);
+      $('buildPv').focus();
+    },
+    motion:app.workspaceMotion,
+    getPan:() => ({ ...app.simPan }),
+    panTo:pan => { app.simPan = pan; applySimScale(); },
+  });
+  document.querySelectorAll('[data-control-tab]').forEach(button => {
+    button.onclick = () => {
+      const manual = button.dataset.controlTab === 'manual';
+      $('manualControls').classList.toggle('hidden', !manual);
+      $('loopLibrary').classList.toggle('hidden', manual);
+      document.querySelectorAll('[data-control-tab]').forEach(tab => tab.setAttribute('aria-pressed', String(tab === button)));
+    };
+  });
+}
+
+function parameterInputPolicy(input) {
+  return ControlWorkspace.parameterPolicy({
+    field:input.dataset.field,
+    label:input.closest('label')?.textContent.trim(),
+    manual:!!input.closest('#manualControls'),
+    min:input.min, max:input.max, step:input.step,
+  });
+}
+
 function setLoopCardInput(card, field, value) {
   const input = card?.querySelector(`[data-field="${field}"]`);
   if (!input || document.activeElement === input || input.dataset.dirty === '1') return;
@@ -1276,16 +1423,15 @@ function pvValueText(pv, value, digits = 1) {
 }
 
 function loopPvText(loop) {
-  const value = Number(loop?.pvValue);
-  return Number.isFinite(value) ? pvValueText(loop.pv, value, 1) : '--';
+  const catalog = pvCatalogItem(loop?.pv);
+  return ControlWorkspace.pvReadout(catalog, app.state, catalog.flowOnly ? 2 : 1);
 }
 
 function cascadePvText(casc, side) {
   const outer = side === 'outer';
-  const value = Number(outer ? casc?.outerPvValue : casc?.innerPvValue);
-  if (!Number.isFinite(value)) return '--';
   const pv = Number(outer ? casc.outer : casc.inner);
-  return pvValueText(pv, value, pvCatalogItem(pv).flowOnly ? 2 : 1);
+  const catalog = pvCatalogItem(pv);
+  return ControlWorkspace.pvReadout(catalog, app.state, catalog.flowOnly ? 2 : 1);
 }
 
 function syncLoopCards(loops, cascades) {
@@ -1320,6 +1466,7 @@ function syncLoopCards(loops, cascades) {
     setLoopCardInput(card, 'innerKp', number(casc.innerKp, 3));
     setLoopCardInput(card, 'innerTi', tiText(casc.innerTi));
     setLoopCardInput(card, 'innerTd', number(casc.innerTd, 1));
+    setLoopCardInput(card, 'innerManualOut', number(casc.innerOut, 1));
     const outerAuto = card.querySelector(`[data-casc-auto="${index}"]`);
     const outerAction = card.querySelector(`[data-casc-action="${index}"]`);
     const innerAuto = card.querySelector(`[data-casc-inner-auto="${index}"]`);
@@ -1346,13 +1493,15 @@ function renderLoops(state) {
   if (!loops.length && !cascades.length) {
     if (wrap.dataset.signature !== 'empty') {
       wrap.dataset.signature = 'empty';
-      wrap.innerHTML = '<div class="muted">暂未搭建回路。先在上方添加。应用参数后生效。</div>';
+      wrap.innerHTML = '<div class="muted">暂未搭建回路。展开左侧“搭建回路”添加，应用参数后生效。</div>';
     }
+    renderLoopWorkspace(loops, cascades);
     return;
   }
-  const signature = loopStructureSignature(loops, cascades);
+  const signature = `${workspaceModel()}|${loopStructureSignature(loops, cascades)}`;
   if (wrap.dataset.signature === signature) {
     syncLoopCards(loops, cascades);
+    renderLoopWorkspace(loops, cascades);
     return;
   }
   wrap.dataset.signature = signature;
@@ -1397,19 +1546,26 @@ function renderLoops(state) {
         </div>
         <span class="mini" data-casc-state="${index}">${casc.outerManual ? '主环手动' : '主环自动'} / ${casc.innerManual ? '副环手动' : '副环自动'}</span>
       </div>
-      <div class="loop-pv-row">
-        <span>主环 PV <b data-reading="outerPv">${cascadePvText(casc, 'outer')}</b></span>
-        <span>副环 PV <b data-reading="innerPv">${cascadePvText(casc, 'inner')}</b></span>
-      </div>
-      <div class="field-grid">
+      <fieldset class="cascade-group">
+        <legend>主环 · ${pvName(casc.outer)}</legend>
+        <p class="loop-pv">PV <b data-reading="outerPv">${cascadePvText(casc, 'outer')}</b></p>
+        <div class="field-grid">
         <label>主环 SP ${outerUnit}<input data-casc="${index}" data-field="outerSp" type="number" value="${number(casc.outerSp, 1)}"></label>
         <label>主环 Kp<input data-casc="${index}" data-field="outerKp" type="number" step="0.01" value="${number(casc.outerKp, 3)}"></label>
         <label>主环 Ti<input data-casc="${index}" data-field="outerTi" type="text" inputmode="decimal" placeholder="有限正数或 inf" value="${tiText(casc.outerTi)}"></label>
         <label>主环 Td<input data-casc="${index}" data-field="outerTd" type="number" value="${number(casc.outerTd, 1)}"></label>
+        </div>
+      </fieldset>
+      <fieldset class="cascade-group">
+        <legend>副环 · ${pvName(casc.inner)}</legend>
+        <p class="loop-pv">PV <b data-reading="innerPv">${cascadePvText(casc, 'inner')}</b></p>
+        <div class="field-grid">
         <label>副环 Kp<input data-casc="${index}" data-field="innerKp" type="number" step="0.01" value="${number(casc.innerKp, 3)}"></label>
         <label>副环 Ti<input data-casc="${index}" data-field="innerTi" type="text" inputmode="decimal" placeholder="有限正数或 inf" value="${tiText(casc.innerTi)}"></label>
         <label>副环 Td<input data-casc="${index}" data-field="innerTd" type="number" value="${number(casc.innerTd, 1)}"></label>
-      </div>
+        <label>阀门手动输出 %<input data-casc="${index}" data-field="innerManualOut" type="number" min="0" max="100" value="${number(casc.innerOut, 1)}"></label>
+        </div>
+      </fieldset>
       <div class="button-row">
         <button data-casc-apply="${index}" class="primary small-button">应用参数</button>
         <button data-casc-auto="${index}" data-manual="${casc.outerManual ? 0 : 1}">${casc.outerManual ? '主环投自动' : '主环投手动'}</button>
@@ -1421,7 +1577,7 @@ function renderLoops(state) {
     wrap.appendChild(div);
   });
   wrap.querySelectorAll('[data-loop-apply]').forEach((btn) => {
-    btn.onclick = () => applyLoop(Number(btn.dataset.loopApply)).catch((e) => toast(e.message, true));
+    btn.onclick = () => app.parameterFeedback.submit(btn, () => applyLoop(Number(btn.dataset.loopApply)));
   });
   wrap.querySelectorAll('[data-loop-auto]').forEach((btn) => {
     btn.onclick = () => applyLoopFlag(Number(btn.dataset.loopAuto), { manual: Number(btn.dataset.manual) }).catch((e) => toast(e.message, true));
@@ -1433,7 +1589,7 @@ function renderLoops(state) {
     btn.onclick = () => sendCommand(`LOOP_DEL ${Number(btn.dataset.loopDel)}`);
   });
   wrap.querySelectorAll('[data-casc-apply]').forEach((btn) => {
-    btn.onclick = () => applyCascade(Number(btn.dataset.cascApply)).catch((e) => toast(e.message, true));
+    btn.onclick = () => app.parameterFeedback.submit(btn, () => applyCascade(Number(btn.dataset.cascApply)));
   });
   wrap.querySelectorAll('[data-casc-auto]').forEach((btn) => {
     btn.onclick = () => applyCascadeFlag(Number(btn.dataset.cascAuto), 'outer', { manual: Number(btn.dataset.manual) }).catch((e) => toast(e.message, true));
@@ -1451,6 +1607,7 @@ function renderLoops(state) {
     btn.onclick = () => sendCommand(`CASC_DEL ${Number(btn.dataset.cascDel)}`);
   });
   syncLoopCards(loops, cascades);
+  renderLoopWorkspace(loops, cascades);
 }
 
 const PARAM_INPUT_SELECTOR = '.field-grid input,[data-loop][data-field],[data-casc][data-field]';
@@ -1510,6 +1667,7 @@ function readCascadeForm(index) {
     innerKp: inputValue(cascInput(index, 'innerKp'), '副环 Kp'),
     innerTi: tiInputValue(cascInput(index, 'innerTi'), '副环 Ti'),
     innerTd: inputValue(cascInput(index, 'innerTd'), '副环 Td'),
+    innerManualOut: inputValue(cascInput(index, 'innerManualOut'), '阀门手动输出'),
   };
 }
 
@@ -1534,11 +1692,7 @@ async function applyLoop(index) {
 async function applyLoopFlag(index, change) {
   const loop = app.state?.loops?.[index];
   if (!loop) return;
-  const form = readLoopForm(index);
-  const manual = change.manual === undefined ? (loop.manual ? 1 : 0) : change.manual;
-  const action = change.action === undefined ? loop.action : change.action;
-  await sendCommand(`SET_PID loop ${index} ${form.kp} ${form.ti} ${form.td} ${action} ${manual} ${form.manualOut}`);
-  clearLoopDirty(index);
+  await sendCommand(ProcessDeviceControls.pidCommand({ kind:'loop', index, value:loop }, 'loop', change));
 }
 
 async function applyCascade(index) {
@@ -1547,7 +1701,7 @@ async function applyCascade(index) {
   const form = readCascadeForm(index);
   if (Number(c.outerSp) !== form.outerSp) await sendCommand(`SET_PVX_SP ${c.outer} ${form.outerSp}`);
   await sendCommand(`SET_PID outer ${index} ${form.outerKp} ${form.outerTi} ${form.outerTd} ${c.outerAction} ${c.outerManual ? 1 : 0} ${c.outerOut}`);
-  await sendCommand(`SET_PID inner ${index} ${form.innerKp} ${form.innerTi} ${form.innerTd} ${c.innerAction} ${c.innerManual ? 1 : 0} ${c.innerOut}`);
+  await sendCommand(`SET_PID inner ${index} ${form.innerKp} ${form.innerTi} ${form.innerTd} ${c.innerAction} ${c.innerManual ? 1 : 0} ${form.innerManualOut}`);
   clearCascadeDirty(index);
   toast('串级参数已应用');
 }
@@ -1555,18 +1709,7 @@ async function applyCascade(index) {
 async function applyCascadeFlag(index, which, change) {
   const c = app.state?.cascades?.[index];
   if (!c) return;
-  const form = readCascadeForm(index);
-  const inner = which === 'inner';
-  const manual = change.manual === undefined
-    ? ((inner ? c.innerManual : c.outerManual) ? 1 : 0)
-    : change.manual;
-  const action = change.action === undefined ? (inner ? c.innerAction : c.outerAction) : change.action;
-  const kp = inner ? form.innerKp : form.outerKp;
-  const ti = inner ? form.innerTi : form.outerTi;
-  const td = inner ? form.innerTd : form.outerTd;
-  const out = inner ? c.innerOut : c.outerOut;
-  await sendCommand(`SET_PID ${inner ? 'inner' : 'outer'} ${index} ${kp} ${ti} ${td} ${action} ${manual} ${out}`);
-  clearCascadeDirty(index);
+  await sendCommand(ProcessDeviceControls.pidCommand({ kind:'casc', index, value:c }, which, change));
 }
 
 function pvName(pv) {
@@ -1937,6 +2080,7 @@ function renderPidProcess(state) {
   box.className = 'pid-process';
   const parts = [];
   loops.forEach((p, i) => {
+    if (!workspaceSelected('loop', i)) return;
     const sum = Number(p.pTerm || 0) + Number(p.iTerm || 0) + Number(p.dTerm || 0);
     const u = Number(p.uBias || 0) - Number(p.action) * sum;
     parts.push(`<div class="pid-item">
@@ -1947,6 +2091,7 @@ function renderPidProcess(state) {
     </div>`);
   });
   cascades.forEach((p, i) => {
+    if (!workspaceSelected('casc', i)) return;
     parts.push(`<div class="pid-item">
       <h3>串级 ${i + 1}：${mvName(p.mv)}</h3>
       <div class="formula">主环 ${pvName(p.outer)}：e=${number(p.outerE, 3)}，P=${number(p.outerP, 3)}，I=${number(p.outerI, 3)}，D=${number(p.outerD, 3)}<br>
@@ -3599,11 +3744,16 @@ function applySimScale() {
   if (!visuals.length) return;
   app.simScale = clamp(Number(app.simScale) || 1, 0.8, 1.8);
   const pan = app.simPan || { x: 0, y: 0 };
-  const labelScale = clamp(1 / app.simScale, 0.86, 1.2);
   for (const visual of visuals) {
-    visual.style.transformOrigin = 'center center';
+    if (visual.classList.contains('hidden')) continue;
+    const viewport = visual.parentElement;
+    if (!viewport.clientWidth || !viewport.clientHeight) continue;
+    const frame = ControlWorkspace.fitFrame({ width:viewport.clientWidth, height:viewport.clientHeight },
+      { width:visual.offsetWidth, height:visual.offsetHeight }, app.simScale);
+    const labelScale = clamp(1 / frame.scale, 0.86, 1.2);
+    visual.style.transformOrigin = '0 0';
     visual.style.setProperty('--sim-label-scale', labelScale.toFixed(3));
-    visual.style.transform = `translate(${Number(pan.x) || 0}px, ${Number(pan.y) || 0}px) scale(${app.simScale})`;
+    visual.style.transform = `translate(${frame.x + (Number(pan.x) || 0)}px, ${frame.y + (Number(pan.y) || 0)}px) scale(${frame.scale})`;
   }
   const readout = $('simZoomValue');
   if (readout) readout.textContent = `${Math.round(app.simScale * 100)}%`;
@@ -3638,6 +3788,7 @@ function setPidPanelVisible(visible) {
   const grid = document.querySelector('.control-grid');
   if (panel) panel.classList.toggle('pid-panel-hidden', !app.pidPanelVisible);
   if (grid) grid.classList.toggle('pid-hidden', !app.pidPanelVisible);
+  $('loopWorkspace')?.classList.toggle('pid-hidden', !app.pidPanelVisible);
   $('pidShowBtn')?.classList.toggle('hidden', app.pidPanelVisible);
 }
 
@@ -3657,6 +3808,7 @@ function applySecondaryLabelVisibility() {
 }
 
 function wirePidPanelControls() {
+  wireControlWorkspace();
   const hide = $('pidToggleBtn');
   const show = $('pidShowBtn');
   if (hide) hide.onclick = () => setPidPanelVisible(false);
@@ -3762,8 +3914,7 @@ function wireStudentControls() {
       await sendCommand('HIGH_SCORE');
     } catch (e) { toast(e.message); }
   };
-  $('applyManualBtn').onclick = async () => {
-    try {
+  $('applyManualBtn').onclick = () => app.parameterFeedback.submit($('applyManualBtn'), async () => {
       const targets = [];
       for (const target of manualTargets()) {
         const input = $(target.id);
@@ -3789,8 +3940,7 @@ function wireStudentControls() {
         delete targets[i].input.dataset.dirty;
       }
       toast('手操参数已应用');
-    } catch (e) { toast(e.message); }
-  };
+  });
   $('biasBtn').onclick = () => sendCommand(`SET_BIAS ${app.state?.bias ? 0 : 1}`).catch((e) => toast(e.message));
   // —— 评分系统开关：关闭时才能改评分细则 ——
   const scoreSystemToggle = $('scoreSystemToggle');
@@ -4278,15 +4428,31 @@ function wireRosterControls() {
 }
 
 function wireLogin() {
+  const setBusy = (form, busy) => {
+    form.setAttribute('aria-busy', String(busy));
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) {
+      if (busy) submit.dataset.idleLabel = submit.textContent;
+      submit.textContent = busy ? '正在登录…' : submit.dataset.idleLabel || submit.textContent;
+      submit.disabled = busy;
+    }
+  };
   document.querySelectorAll('.login-tab').forEach((tab) => {
     tab.onclick = () => {
-      document.querySelectorAll('.login-tab').forEach((x) => x.classList.toggle('active', x === tab));
+      document.querySelectorAll('.login-tab').forEach((x) => {
+        x.classList.toggle('active', x === tab);
+        x.setAttribute('aria-pressed', String(x === tab));
+      });
       $('studentLoginForm').classList.toggle('hidden', tab.dataset.role !== 'student');
       $('teacherLoginForm').classList.toggle('hidden', tab.dataset.role !== 'teacher');
     };
   });
   $('studentLoginForm').onsubmit = async (e) => {
     e.preventDefault();
+    const form = e.currentTarget;
+    if (form.getAttribute('aria-busy') === 'true') return;
+    setBusy(form, true);
+    $('loginError').textContent = '';
     try {
       await api('/api/login', { method: 'POST', body: JSON.stringify({
         role: 'student',
@@ -4298,14 +4464,20 @@ function wireLogin() {
       $('loginError').textContent = '';
       await connectStudent();
     } catch (err) { $('loginError').textContent = err.message; }
+    finally { setBusy(form, false); }
   };
   $('teacherLoginForm').onsubmit = async (e) => {
     e.preventDefault();
+    const form = e.currentTarget;
+    if (form.getAttribute('aria-busy') === 'true') return;
+    setBusy(form, true);
+    $('loginError').textContent = '';
     try {
       await api('/api/login', { method: 'POST', body: JSON.stringify({ role: 'teacher', teacherCode: $('teacherCode').value, model: $('teacherModel')?.value || 'tank' }) });
       $('loginError').textContent = '';
       await connectTeacher();
     } catch (err) { $('loginError').textContent = err.message; }
+    finally { setBusy(form, false); }
   };
   $('logoutBtn').onclick = async () => {
     app.loggingOut = true;

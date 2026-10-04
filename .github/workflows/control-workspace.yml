@@ -1,0 +1,38 @@
+name: Control workspace
+
+on:
+  pull_request:
+  push:
+    paths:
+      - 'public/**'
+      - 'scripts/test-controls.js'
+      - 'scripts/control-workspace.test.js'
+      - 'scripts/parameter-slider.test.js'
+      - 'scripts/critical-readouts.test.js'
+      - 'scripts/parameter-feedback.test.js'
+      - 'scripts/workspace-motion.test.js'
+      - 'scripts/process-devices.test.js'
+      - 'scripts/process-device-controls.test.js'
+      - 'package.json'
+      - '.github/workflows/control-workspace.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check JavaScript syntax
+        run: npm run check
+      - name: Test workspace, devices, motion, readouts, feedback and sliders
+        run: npm run test:controls

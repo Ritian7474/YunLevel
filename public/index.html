@@ -3,8 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0E151D">
   <title>PID 云仿真</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/control-workspace.css">
+  <link rel="stylesheet" href="/process-devices.css">
 </head>
 <body>
   <section id="loginView" class="login-shell">
@@ -12,27 +15,28 @@
       <div class="brand-mark">YL</div>
       <h1 id="loginTitle">PID 云仿真</h1>
       <p class="muted">同一服务器，独立会话；登录后每位学生拥有自己的仿真状态。</p>
-      <div class="login-tabs">
-        <button class="login-tab active" data-role="student">学生登录</button>
-        <button class="login-tab" data-role="teacher">教师登录</button>
+      <div class="login-tabs" role="group" aria-label="登录角色">
+        <button class="login-tab active" data-role="student" aria-pressed="true">学生登录</button>
+        <button class="login-tab" data-role="teacher" aria-pressed="false">教师登录</button>
       </div>
       <form id="studentLoginForm" class="login-form">
         <label>实验模型<select id="studentModel"><option value="tank">三级液位</option><option value="hx" class="hx-model-option hidden">换热器</option></select></label>
-        <label>班级码<input id="classCode" autocomplete="organization" required></label>
-        <label>学号<input id="studentId" autocomplete="username" required></label>
-        <label>姓名<input id="studentName" autocomplete="name" required></label>
+        <label>班级码<input id="classCode" name="classCode" autocomplete="organization" spellcheck="false" required></label>
+        <label>学号<input id="studentId" name="studentId" autocomplete="username" spellcheck="false" required></label>
+        <label>姓名<input id="studentName" name="studentName" autocomplete="name" required></label>
         <button class="primary" type="submit">进入仿真</button>
       </form>
       <form id="teacherLoginForm" class="login-form hidden">
         <label>实验模型<select id="teacherModel"><option value="tank">三级液位</option><option value="hx">换热器</option></select></label>
-        <label>教师口令<input id="teacherCode" type="password" required></label>
+        <label>教师口令<input id="teacherCode" name="teacherCode" type="password" autocomplete="current-password" required></label>
         <button class="primary" type="submit">进入教师端</button>
       </form>
-      <div id="loginError" class="error"></div>
+      <div id="loginError" class="error" role="alert" aria-live="polite"></div>
     </div>
   </section>
 
   <section id="appView" class="app hidden">
+    <a class="skip-link" href="#viewControl">跳到实验内容</a>
     <header class="topbar">
       <div class="topbar-brand">
         <div class="brand-mark small">YL</div>
@@ -58,11 +62,10 @@
 
     <div id="simBackdrop" class="sim-backdrop hidden"></div>
 
-    <main id="viewControl" class="view active">
-      <div class="control-grid">
-        <section class="panel control-panel">
+    <main id="viewControl" class="view active" tabindex="-1">
+      <section class="panel control-toolbar">
           <div class="panel-head">
-            <h2>控制区</h2>
+            <h2>运行控制</h2>
             <span id="runState" class="badge">未启动</span>
           </div>
           <div class="button-row">
@@ -72,7 +75,9 @@
             <button id="presetBtn" class="teacher-only hidden">推荐工况</button>
             <button id="highScoreBtn" class="teacher-only hidden">高分模板</button>
           </div>
-          <div class="project-row">
+          <details class="project-tools">
+            <summary>工程 / 方案</summary>
+            <div class="project-row">
             <button id="currentSaveBtn">保存当前状态</button>
             <button id="currentRestoreBtn">恢复上传保存状态</button>
             <label class="project-slot">云端方案
@@ -95,24 +100,24 @@
             <button id="exportParamsCsvBtn">导出参数 CSV</button>
             <button id="exportParamsExcelBtn">导出参数 Excel</button>
           </div>
-          <div class="segmented">
+          </details>
+      </section>
+      <div class="control-grid">
+        <section class="panel control-panel">
+  <div class="panel-head"><h2>回路与手操</h2></div>
+  <div class="sidebar-tabs" role="group" aria-label="控制区内容">
+    <button type="button" data-control-tab="loops" aria-controls="loopLibrary" aria-pressed="true">回路</button>
+    <button type="button" data-control-tab="manual" aria-controls="manualControls" aria-pressed="false">手操</button>
+  </div>
+          <div id="loopLibrary">
+            <div id="loopList" class="loop-list" aria-label="已搭建回路"></div>
+            <details id="loopBuilder" class="loop-builder">
+              <summary>搭建回路</summary>
+              <div class="segmented">
             <button data-scheme="0" class="active">单回路</button>
             <button data-scheme="1">串级</button>
           </div>
-          <div class="field-grid">
-            <label>P101 泵开度 %<input id="pumpInput" type="number" min="0" max="100" step="1" value="0"></label>
-            <label>FV101 手操 %<input id="fv101Input" type="number" min="0" max="100" step="1" value="0"></label>
-            <label>FV102 手操 %<input id="fv102Input" type="number" min="0" max="100" step="1" value="0"></label>
-            <label>FV103 手操 %<input id="fv103Input" type="number" min="0" max="100" step="1" value="0"></label>
-            <label>FV104 手操 %<input id="fv104Input" type="number" min="0" max="100" step="1" value="0"></label>
-          </div>
-          <div class="button-row compact">
-            <button id="applyManualBtn">应用手操</button>
-            <button id="biasBtn" class="toggle teacher-only hidden">前馈偏置：关</button>
-            <button id="clearLoopsBtn" class="danger">清空回路</button>
-          </div>
 
-          <div class="section-title">搭建回路</div>
           <div class="builder-grid">
             <label>回路类型
               <select id="buildType">
@@ -150,7 +155,24 @@
             </label>
             <button id="addLoopBtn" class="primary">添加</button>
           </div>
-          <div id="loopCards" class="loop-cards"></div>
+          </details>
+  </div>
+          <div id="manualControls" class="hidden">
+            <div class="field-grid">
+            <label>P101 泵开度 %<input id="pumpInput" type="number" min="0" max="100" step="1" value="0"></label>
+            <label>FV101 手操 %<input id="fv101Input" type="number" min="0" max="100" step="1" value="0"></label>
+            <label>FV102 手操 %<input id="fv102Input" type="number" min="0" max="100" step="1" value="0"></label>
+            <label>FV103 手操 %<input id="fv103Input" type="number" min="0" max="100" step="1" value="0"></label>
+            <label>FV104 手操 %<input id="fv104Input" type="number" min="0" max="100" step="1" value="0"></label>
+          </div>
+          <div class="button-row compact">
+            <button id="applyManualBtn">应用手操</button>
+            <button id="biasBtn" class="toggle teacher-only hidden">前馈偏置：关</button>
+            <button id="clearLoopsBtn" class="danger">清空回路</button>
+          </div>
+
+          </div>
+
         </section>
 
         <section class="panel sim-panel">
@@ -158,10 +180,10 @@
             <h2>仿真状态</h2>
             <div class="sim-panel-actions">
               <span id="simTime" class="badge">t = 0 s</span>
-              <button id="simZoomOutBtn" class="icon-button" type="button" title="缩小仿真图" aria-label="缩小仿真图">−</button>
+              <button id="simZoomOutBtn" class="icon-button" type="button" title="缩小仿真图" aria-label="缩小仿真图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
               <span id="simZoomValue" class="zoom-readout">100%</span>
-              <button id="simZoomInBtn" class="icon-button" type="button" title="放大仿真图" aria-label="放大仿真图">+</button>
-              <button id="simExpandBtn" class="icon-button" type="button" title="放大到全屏区域" aria-label="放大到全屏区域">⛶</button>
+              <button id="simZoomInBtn" class="icon-button" type="button" title="放大仿真图" aria-label="放大仿真图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg></button>
+              <button id="simExpandBtn" class="icon-button" type="button" title="放大到全屏区域" aria-label="放大到全屏区域"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/></svg></button>
               <button id="pidShowBtn" class="small-button hidden" type="button" title="显示 PID 计算过程">显示 PID</button>
             </div>
           </div>
@@ -195,7 +217,7 @@
                   <rect x="270" y="70" width="130" height="190" rx="8" fill="#152630" stroke="#8fb0c0" stroke-width="1.8"/>
                   <text x="335" y="100" text-anchor="middle" fill="#e8f4fa" font-size="14" font-weight="600">T1</text>
                   <rect x="288" y="120" width="94" height="120" rx="4" fill="#0a2030" stroke="#2bb89a" stroke-width="1.2"/>
-                  <rect x="288" y="175" width="94" height="65" rx="3" fill="#149a7b"/>
+                  <rect id="tankSvgFill1" x="288" y="240" width="94" height="0" rx="3" fill="#149a7b"/>
                   <text x="335" y="215" text-anchor="middle" fill="#d7fff0" font-size="11">LI101</text>
 
                   <!-- T1 出 → FV102 → T2 顶 -->
@@ -210,7 +232,7 @@
                   <rect x="530" y="70" width="130" height="190" rx="8" fill="#152630" stroke="#8fb0c0" stroke-width="1.8"/>
                   <text x="595" y="100" text-anchor="middle" fill="#e8f4fa" font-size="14" font-weight="600">T2</text>
                   <rect x="548" y="120" width="94" height="120" rx="4" fill="#0a2030" stroke="#2bb89a" stroke-width="1.2"/>
-                  <rect x="548" y="190" width="94" height="50" rx="3" fill="#149a7b"/>
+                  <rect id="tankSvgFill2" x="548" y="240" width="94" height="0" rx="3" fill="#149a7b"/>
                   <text x="595" y="220" text-anchor="middle" fill="#d7fff0" font-size="11">LI102</text>
 
                   <!-- T2 出 → FV103 → T3 顶 -->
@@ -225,7 +247,7 @@
                   <rect x="790" y="70" width="130" height="190" rx="8" fill="#152630" stroke="#8fb0c0" stroke-width="1.8"/>
                   <text x="855" y="100" text-anchor="middle" fill="#e8f4fa" font-size="14" font-weight="600">T3</text>
                   <rect x="808" y="120" width="94" height="120" rx="4" fill="#0a2030" stroke="#2bb89a" stroke-width="1.2"/>
-                  <rect x="808" y="205" width="94" height="35" rx="3" fill="#149a7b"/>
+                  <rect id="tankSvgFill3" x="808" y="240" width="94" height="0" rx="3" fill="#149a7b"/>
                   <text x="855" y="228" text-anchor="middle" fill="#d7fff0" font-size="11">LI103</text>
 
                   <!-- T3 出 → FV104 → 排水 -->
@@ -263,23 +285,18 @@
                 <div class="hidden" id="tank1Node">
                   <div id="tank1Fill"></div>
                   <div id="tank1SpMarker"><i></i><span id="tank1SpLabel"></span></div>
-                  <b id="vH1"></b><small id="vSp1"></small><b id="mL1"></b>
+                  <b id="vH1"></b><small id="vSp1"></small>
                 </div>
                 <div class="hidden" id="tank2Node">
                   <div id="tank2Fill"></div>
                   <div id="tank2SpMarker"><i></i><span id="tank2SpLabel"></span></div>
-                  <b id="vH2"></b><small id="vSp2"></small><b id="mL2"></b>
+                  <b id="vH2"></b><small id="vSp2"></small>
                 </div>
                 <div class="hidden" id="tank3Node">
                   <div id="tank3Fill"></div>
                   <div id="tank3SpMarker"><i></i><span id="tank3SpLabel"></span></div>
-                  <b id="vH3"></b><small id="vSp3"></small><b id="mL3"></b>
+                  <b id="vH3"></b><small id="vSp3"></small>
                 </div>
-                <span class="hidden" id="mQin"></span>
-                <span class="hidden" id="mQ12"></span>
-                <span class="hidden" id="mQ23"></span>
-                <span class="hidden" id="mQout"></span>
-                <span class="hidden" id="mPi"></span>
               </div>
             </div>
           <div id="hxProcessVisual" class="process-visual hx-visual hidden">
@@ -394,7 +411,8 @@
               </div>
             </div>
 </div>
-          <div id="metricGrid" class="metric-grid">
+          <div id="criticalReadouts" class="critical-readouts" role="group" aria-label="关键测量值"></div>
+          <details class="measurement-details"><summary>全部测量值</summary><div id="metricGrid" class="metric-grid">
             <div><span>LI101</span><b id="mL1">0.0%</b></div>
             <div><span>LI102</span><b id="mL2">0.0%</b></div>
             <div><span>LI103</span><b id="mL3">0.0%</b></div>
@@ -404,14 +422,24 @@
             <div><span>出口流量</span><b id="mQout">0.00 L/min</b></div>
             <div><span>PI101</span><b id="mPi">0.0 kPa</b></div>
           </div>
+          </details>
         </section>
 
-        <section class="panel pid-panel">
+        <section id="loopWorkspace" class="panel loop-workspace" aria-label="所选回路参数">
           <div class="panel-head">
-            <h2>PID 计算过程</h2>
-            <button id="pidToggleBtn" class="small-button" type="button" title="隐藏 PID 计算过程">隐藏计算</button>
+            <h2>回路参数</h2>
+            <span id="loopWorkspaceSelection" class="muted small"></span>
           </div>
-          <div id="pidProcess" class="pid-process empty">暂未添加回路</div>
+          <div class="loop-workspace-grid">
+            <div id="loopCards" class="loop-cards"></div>
+            <section class="panel pid-panel">
+              <div class="panel-head">
+                <h2>PID 计算过程</h2>
+                <button id="pidToggleBtn" class="small-button" type="button" title="隐藏 PID 计算过程">隐藏计算</button>
+              </div>
+              <div id="pidProcess" class="pid-process empty">暂未添加回路</div>
+            </section>
+          </div>
         </section>
       </div>
     </main>
@@ -763,8 +791,14 @@
     </main>
   </section>
 
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   <script src="/vendor/xlsx.full.min.js"></script>
+  <script src="/control-workspace.js"></script>
+  <script src="/workspace-motion.js"></script>
+  <script src="/parameter-slider.js"></script>
+  <script src="/parameter-feedback.js"></script>
+  <script src="/process-devices.js"></script>
+  <script src="/process-device-controls.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
