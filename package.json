@@ -14,5 +14,5 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "UNLICENSED"
+  "license": "GPL-3.0-or-later"
 }
