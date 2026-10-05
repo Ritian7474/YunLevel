@@ -45,6 +45,7 @@ struct Engine {
 };
 
 Engine g_engine;
+bool g_bias_allowed = true;
 
 double clampd(double v, double lo, double hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -118,7 +119,7 @@ void load_state() {
 
     g_engine.sys = savedSys;
     g_score = savedScore;
-    g_engine.bias = h.bias != 0;
+    g_engine.bias = g_bias_allowed && h.bias != 0;
     g_engine.sim_time = h.sim_time;
     g_engine.paused = false;
     g_engine.sys.running = false;
@@ -147,6 +148,7 @@ void reset_simulation() {
     for (int i = 0; i < nCasc; ++i) cascBak[i] = s->casc[i];
 
     const double spf1 = s->spf[0], spf2 = s->spf[1], spf3 = s->spf[2];
+    const double sp1 = s->sp1, sp2 = s->sp2, sp3 = s->sp3, setpoint = s->setpoint;
 
     InitSimulation(s);
     s->mode = mode;
@@ -159,6 +161,7 @@ void reset_simulation() {
     for (int i = 0; i < nCasc; ++i) s->casc[i] = cascBak[i];
     s->nCasc = nCasc;
     s->spf[0] = spf1; s->spf[1] = spf2; s->spf[2] = spf3;
+    s->sp1 = sp1; s->sp2 = sp2; s->sp3 = sp3; s->setpoint = setpoint;
     s->needRecalcLoops = 1;
 
     ApplyPidGains(s);
@@ -218,21 +221,21 @@ void apply_high_score_template() {
     TankSystem* s = &g_engine.sys;
     if (s->running) return;
     ApplyHighScoreTemplate(s);
-    g_engine.bias = true;
-    g_usePidBias = true;
+    g_engine.bias = g_bias_allowed;
+    g_usePidBias = g_engine.bias;
     open_free_valves();
     g_engine.state_dirty = true;
 }
 
 void set_score_mode(int mode) {
-    if (g_engine.sys.running) return;
+    if (ScoreSessionActive()) return;
     if (mode < SCORE_OFF || mode > SCORE_SYSTEM) mode = SCORE_OFF;
     ScoreSetMode((ScoreMode)mode);
     g_engine.state_dirty = true;
 }
 
 void set_score_tank(int tank) {
-    if (g_engine.sys.running || g_score.mode != SCORE_TANK) return;
+    if (ScoreSessionActive() || g_score.mode != SCORE_TANK) return;
     if (tank < 0) tank = 0;
     if (tank > 2) tank = 2;
     g_score.tank = tank;
@@ -569,7 +572,7 @@ void process_line(const std::string& line) {
         state_changed = true;
     } else if (cmd == "SET_BIAS") {
         int v = 0; iss >> v;
-        g_engine.bias = v != 0;
+        g_engine.bias = g_bias_allowed && v != 0;
         g_usePidBias = g_engine.bias;
         state_changed = true;
     } else if (cmd == "SET_MODE") {
@@ -709,8 +712,8 @@ void process_line(const std::string& line) {
         ScoreSetConfig(du, ds, bt, bh, da, dm, dd);
     } else if (cmd == "SCORE_MODE") {
         int mode = 0; iss >> mode;
-        if (g_engine.sys.running) {
-            emit_error("SCORE_MODE_RUNNING", "运行中不能切换评分方案");
+        if (ScoreSessionActive()) {
+            emit_error("SCORE_MODE_RUNNING", "评分中不能切换评分方案");
             return;
         }
         if (mode < SCORE_OFF || mode > SCORE_SYSTEM) {
@@ -731,6 +734,13 @@ void process_line(const std::string& line) {
             return;
         }
         start_score_session();
+        state_changed = true;
+    } else if (cmd == "SCORE_FINISH") {
+        ScoreFinishSession();
+        score_ended = ScoreTakeFinishedEvent();
+        g_engine.sys.running = false;
+        g_engine.sys.paused = false;
+        g_engine.paused = false;
         state_changed = true;
     } else if (cmd == "SCORE_END") {
         ScoreEndSession();
@@ -768,6 +778,8 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--state-file" && i + 1 < argc) {
             g_engine.state_path = argv[++i];
+        } else if (arg == "--no-pid-bias") {
+            g_bias_allowed = false;
         }
     }
     load_state();

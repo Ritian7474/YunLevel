@@ -7,15 +7,9 @@ double TankAreaM2() {
     return PI_C * d * d / 4.0;   // m^2
 }
 
-double OrificeAreaM2() {
-    double d = OUT_D_MM * MM2M;  // m
-    return PI_C * d * d / 4.0;   // m^2
-}
-
-// Torricelli: Q = Cd * a * sqrt(2 g h)  [m^3/s], h in m
-double TorricelliQ(double h_m) {
-    if (h_m <= 0.0) return 0.0;
-    return CD_ORIFICE * OrificeAreaM2() * std::sqrt(2.0 * G_MPS2 * h_m);
+double GravityPipeQ(int pipe, double head_m, double opening_pct) {
+    if (pipe < 0 || pipe >= 3) return 0.0;
+    return pipe_hydraulics::flow(GRAVITY_PIPES[pipe], head_m, opening_pct);
 }
 
 static double clampd(double v, double lo, double hi) {
@@ -109,14 +103,15 @@ void ApplyPidGains(TankSystem* s) {
 
 // 当前给水流量占“泵可用流量”的百分比（主环输出的工程口径）
 // 主环稳态前馈：把主控罐液位稳在 SP 所需的给水流量（% 泵可用流量）
-//   稳态时 q_in = q_out = Torricelli(h_sp) × 本罐出口阀开度
+//   稳态时 q_in = q_out = 本罐出口管路在目标液位和当前阀位下的流量
 static double cascade_ff(const TankSystem* s, int k) {
     double qav = clampd(s->pump, 0.0, 100.0) / 100.0 * Q_PUMP_MAX_LMIN;   // L/min
     if (qav < 1e-9) return 0.0;
     double sp = (k == 0) ? s->sp1 : (k == 1 ? s->sp2 : s->sp3);
     double v_out = clampd(OutletValveValue(s, k), 0.0, 100.0) / 100.0;
-    double q_need = TorricelliQ(sp / 100.0 * TANK_H_MM * MM2M) * M3S2LMIN;
-    return clampd(q_need * v_out / qav * 100.0, 0.0, 100.0);
+    double q_need = GravityPipeQ(k, sp / 100.0 * TANK_H_MM * MM2M,
+        v_out * 100.0) * M3S2LMIN;
+    return clampd(q_need / qav * 100.0, 0.0, 100.0);
 }
 
 
@@ -345,16 +340,12 @@ double LoopFeedforward(const TankSystem* s, const LoopCfg* L) {
     // 稳态物料平衡（对任意 PV×MV 组态都成立）：
     //   本罐要稳在 SP，就必须让“本罐出料” q_target 稳定流出；
     //   该阀无论装在本罐进口、本罐出口，还是更远的上/下游，稳态流量都等于 q_target。
-    //   因此前馈 = q_need / 该阀满开流量（按 SP 工况取阀的出水能力，与旧版整定口径一致）。
+    //   进口泵阀按流量比例反算；重力管路按同一水力方程反算阀位。
     const double q_avail = clampd(s->pump, 0.0, 100.0) / 100.0 * Q_PUMP_MAX_LMIN * LMIN2M3S;
     const double v_out[N_PV] = { clampd(s->valve_12,  0.0, 100.0) / 100.0,   // T1 出口阀 FV102
                                  clampd(s->valve_23,  0.0, 100.0) / 100.0,   // T2 出口阀 FV103
                                  clampd(s->valve_out, 0.0, 100.0) / 100.0 };
     const double spm[N_PV] = { s->sp1, s->sp2, s->sp3 };
-    // SP 工况下各罐的出水能力：做前馈分母（不随当前液位变，避免前馈跟液位自我抵消拖慢调节）
-    const double tq_sp[N_PV] = { TorricelliQ(spm[0] / 100.0 * TANK_H_MM * MM2M),
-                                 TorricelliQ(spm[1] / 100.0 * TANK_H_MM * MM2M),
-                                 TorricelliQ(spm[2] / 100.0 * TANK_H_MM * MM2M) };
     const double v_in01 = clampd(s->valve_in, 0.0, 100.0) / 100.0;
     // 该阀稳态必须通过的流量 q_need：
     //   ① 该阀就是本罐出口阀（mv == pv+1）：Qout = Qin，用本罐实测进料 → 扰动立即反映，任何液位下都精确；
@@ -362,15 +353,19 @@ double LoopFeedforward(const TankSystem* s, const LoopCfg* L) {
     double q_need;
     if (mv == pv + 1) {
         const double q_in = (pv == 0) ? (q_avail * v_in01)
-                                     : (TorricelliQ(s->hs[pv - 1]) * v_out[pv - 1]);
+                                     : GravityPipeQ(pv - 1, s->hs[pv - 1], v_out[pv - 1] * 100.0);
         q_need = q_in;
     } else {
-        q_need = tq_sp[pv] * v_out[pv];
+        q_need = GravityPipeQ(pv, spm[pv] / 100.0 * TANK_H_MM * MM2M,
+            v_out[pv] * 100.0);
     }
-    // 该阀满开流量：FV101 受泵可用量限制，其余由阀前罐在 SP 工况下的出水能力决定
-    const double qfull = (mv == 0) ? q_avail : tq_sp[mv - 1];
-    if (qfull < 1e-12) return 0.0;
-    return clampd(q_need / qfull * 100.0, 0.0, 100.0);
+    // FV101 受泵可用量限制；其余阀用目标液位对应的水头反算。
+    if (mv == 0) {
+        if (q_avail < 1e-12) return 0.0;
+        return clampd(q_need / q_avail * 100.0, 0.0, 100.0);
+    }
+    return pipe_hydraulics::opening_for_flow(GRAVITY_PIPES[mv - 1],
+        spm[mv - 1] / 100.0 * TANK_H_MM * MM2M, q_need);
 }
 
 void LoopApplyDefaults(TankSystem* s, LoopCfg* L) {
@@ -575,7 +570,7 @@ void ApplyHighScoreTemplate(TankSystem* s) {
     s->sp1 = s->sp2 = s->sp3 = 50.0;
     s->setpoint = 50.0;
     s->spf[0] = s->spf[1] = s->spf[2] = 50.0;
-    // 泵开度 60%：给水能力 12 L/min，SP=50% 稳态需 ~9 L/min，既留调节余量，
+    // 泵开度 60%：给水能力 12 L/min，实际出水需求由各段管路阻力计算，留调节余量，
     // 又不会像泵满开那样强推入口，避免首罐/二罐在建立液位阶段大幅超调。
     s->pump_cmd = 60.0;
     s->mst_out_cmd = 100.0;
@@ -761,10 +756,21 @@ static void plant_substep(TankSystem* s, double dt) {
     s->valve_23 = rate_limit(clampd(s->valve_23_cmd, 0.0, 100.0), s->valve_23, VALVE_RATE_PCT_S, dt);
 
     // Flows (SI)
-    double q12 = TorricelliQ(s->hs[0]) * (s->valve_12 / 100.0);
-    double q23 = TorricelliQ(s->hs[1]) * (s->valve_23 / 100.0);
-    double qout = TorricelliQ(s->hs[2]) * (s->valve_out / 100.0);
+    double q12 = GravityPipeQ(0, s->hs[0], s->valve_12);
+    double q23 = GravityPipeQ(1, s->hs[1], s->valve_23);
+    double qout = GravityPipeQ(2, s->hs[2], s->valve_out);
     double qin = s->q_pump * (s->valve_in / 100.0);   // FV101 给水总阀节流
+
+    // Conservative empty-tank boundary: a numerical substep cannot drain more
+    // water than is stored plus the inflow during that same substep.
+    auto available_outflow = [&](double candidate, double inflow, double level) {
+        const double available = inflow + std::max(0.0, level) * A / dt;
+        if (candidate > available) s->underflow_flag = 1;
+        return std::min(candidate, available);
+    };
+    q12 = available_outflow(q12, qin, s->hs[0]);
+    q23 = available_outflow(q23, q12, s->hs[1]);
+    qout = available_outflow(qout, q23, s->hs[2]);
 
     // PI101 泵出口压力（简化理想泵特性 H = H0*n^2 - k*q^2，kPa）
     // 注意：q 取"阀后实际流量"qin —— 阀门关小时流量减小、扬程沿泵曲线上抬，
@@ -792,19 +798,22 @@ static void plant_substep(TankSystem* s, double dt) {
         qov = excess * A / dt; // m^3/s equivalent
         s->hs[2] = Hmax;
         s->overflow_flag = 1;
-        s->overflow_volume_l += excess * A * M3S2LMIN * dt; // m^3 -> L
+        s->overflow_volume_l += excess * A * 1000.0; // m^3 -> L
+        s->vol_out[2] += excess * A;
     }
     if (s->hs[1] > Hmax) {
         double excess = s->hs[1] - Hmax;
         s->hs[1] = Hmax;
         s->overflow_flag = 1;
-        s->overflow_volume_l += excess * A * M3S2LMIN * dt;
+        s->overflow_volume_l += excess * A * 1000.0;
+        s->vol_out[1] += excess * A;
     }
     if (s->hs[0] > Hmax) {
         double excess = s->hs[0] - Hmax;
         s->hs[0] = Hmax;
         s->overflow_flag = 1;
-        s->overflow_volume_l += excess * A * M3S2LMIN * dt;
+        s->overflow_volume_l += excess * A * 1000.0;
+        s->vol_out[0] += excess * A;
     }
 
     // Track volumes for balance check

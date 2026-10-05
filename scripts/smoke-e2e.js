@@ -21,10 +21,11 @@
  * Exit code 0 = all checks passed.
  */
 
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { removeTestDir } = require('./test-support');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = Number(process.env.SMOKE_PORT || 8097);
@@ -62,6 +63,7 @@ function sleep(ms) {
 }
 
 const state = { teacher: '', student: '', classId: '', hxTeacher: '', hxStudent: '' };
+const loggedInCookies = new Set();
 
 async function api(urlPath, opts) {
   opts = opts || {};
@@ -81,6 +83,7 @@ async function api(urlPath, opts) {
     const list = res.headers.getSetCookie();
     if (list.length) cookie = list.map(function (c) { return c.split(';')[0]; }).join('; ');
   }
+  if (urlPath === '/api/login' && res.status === 200 && cookie) loggedInCookies.add(cookie);
   return { status: res.status, text: text, json: json, cookie: cookie, headers: res.headers };
 }
 
@@ -100,16 +103,21 @@ async function waitHealth(timeoutMs) {
   throw new Error('server did not become healthy: ' + last);
 }
 
-function enginePids() {
-  try {
-    const out = execSync(
-      'powershell -NoProfile -Command "Get-Process YunEngine -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"',
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    );
+function enginePids(dataDir) {
+  if (process.platform === 'win32') {
+    const escaped = dataDir.replace(/'/g, "''");
+    const out = execFileSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'YunEngine.exe','HxEngine.exe' -and $_.CommandLine -like '*${escaped}*' } | Select-Object -ExpandProperty ProcessId`],
+      { encoding: 'utf8', windowsHide: true });
     return out.split(/\s+/).filter(Boolean).map(Number);
-  } catch (err) {
-    return [];
   }
+  if (process.platform === 'linux') return fs.readdirSync('/proc').filter(p => /^\d+$/.test(p)).map(Number).filter(pid => {
+    try {
+      const exe = fs.readlinkSync(`/proc/${pid}/exe`);
+      return ['YunEngine', 'HxEngine'].includes(path.basename(exe)) && fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(dataDir);
+    } catch { return false; }
+  });
+  throw new Error('Process cleanup verification supports Windows (PowerShell 7) and Linux.');
 }
 
 function cmdAs(cookie, cmdText) {
@@ -122,6 +130,15 @@ function cmd(cmdText) {
 
 function cmdHx(cmdText) {
   return cmdAs(state.hxStudent, cmdText);
+}
+
+async function advanceStudent(model, count) {
+  for (let i = 0; i < count; i++) {
+    const result = await api('/api/teacher/command/' + state.classId + '/' + STUDENT_ID, {
+      method: 'POST', cookie: state.teacher, body: { cmd: 'TICK 1', model },
+    });
+    if (result.status !== 200) throw new Error('teacher advance failed: ' + result.text);
+  }
 }
 
 function st(res) {
@@ -138,7 +155,7 @@ async function main() {
   console.log('port      : ' + PORT);
   console.log('data dir  : ' + dataDir);
 
-  const before = enginePids();
+  const before = enginePids(dataDir);
   const child = spawn(process.execPath, [path.join(ROOT, 'server', 'server.js')], {
     cwd: ROOT,
     env: Object.assign({}, process.env, {
@@ -272,7 +289,7 @@ async function main() {
     const modeRun = await cmd('SET_MODE 1');
     check('mode switch blocked while running', modeRun.status === 400 && modeRun.json && modeRun.json.code === 'MODE_RUNNING', modeRun.text.slice(0, 160));
 
-    for (let i = 0; i < 20; i++) await cmd('TICK 1');
+    await advanceStudent('tank', 20);
 
     const hist = await api('/api/history', { cookie: state.student });
     check('history endpoint 200', hist.status === 200, 'status ' + hist.status);
@@ -296,8 +313,11 @@ async function main() {
     check('PAUSE toggles', st(paused) && st(paused).paused === true, paused.text.slice(0, 160));
 
     section('project save / restore / export');
-    const setSp = await cmd('SET_SP 2 45');
-    check('SET_SP accepted', setSp.status === 200, setSp.text.slice(0, 160));
+    const forbiddenSp = await cmd('SET_SP 2 45');
+    check('student cannot change teacher SP', forbiddenSp.status === 403, forbiddenSp.text);
+    await api('/api/teacher/settings', { method: 'POST', cookie: state.teacher, body: { scoreConfig: { sp3: 45 } } });
+    const setSp = await cmd('STATE');
+    check('teacher SP applied', setSp.status === 200, setSp.text.slice(0, 160));
     check('SET_SP writes the indexed tank (0-based)', !!st(setSp) && Math.abs(Number(st(setSp).sp3) - 45) < 1e-6, 'sp3 ' + (st(setSp) && st(setSp).sp3));
 
     const cur = await api('/api/current/save', { method: 'POST', cookie: state.student, body: {} });
@@ -360,26 +380,26 @@ async function main() {
 
     section('score');
     const notCold = await cmd('SCORE_START 1');
-    check('score refused while not cold', notCold.status === 400 && notCold.json && notCold.json.code === 'SCORE_START_NOT_COLD', notCold.text.slice(0, 160));
+    check('score refused while not cold', notCold.status === 409 && notCold.json && notCold.json.code === 'SCORE_START_NOT_COLD', notCold.text.slice(0, 160));
 
     const reset = await cmd('RESET');
     check('RESET returns to cold', reset.status === 200 && Number(st(reset).sim_time) === 0, reset.text.slice(0, 160));
 
     const noMode = await cmd('SCORE_START 1');
-    check('score refused without a plan', noMode.status === 400 && noMode.json && noMode.json.code === 'SCORE_START_MODE_REQUIRED', noMode.text.slice(0, 160));
+    check('score refused without a plan', noMode.status === 409 && noMode.json && noMode.json.code === 'SCORING_DISABLED', noMode.text.slice(0, 160));
 
-    const scoreMode = await cmd('SCORE_MODE 1');
+    const scoreMode = await api('/api/teacher/settings', { method: 'POST', cookie: state.teacher, body: { scoreSystemOn: true, scoreConfig: { modeTank: 1 } } });
     check('SCORE_MODE 1 accepted', scoreMode.status === 200, scoreMode.text.slice(0, 160));
-    const scoreMode2 = await cmd('SCORE_MODE 2');
+    const scoreMode2 = await api('/api/teacher/settings', { method: 'POST', cookie: state.teacher, body: { scoreConfig: { modeTank: 2 } } });
     check('SCORE_MODE 2 accepted', scoreMode2.status === 200, scoreMode2.text.slice(0, 160));
-    const scoreTank = await cmd('SCORE_TANK 1');
+    const scoreTank = await api('/api/teacher/settings', { method: 'POST', cookie: state.teacher, body: { scoreConfig: { tankIndex: 1 } } });
     check('SCORE_TANK 1 accepted', scoreTank.status === 200, scoreTank.text.slice(0, 160));
     const scoreStart = await cmd('SCORE_START 1');
     check('SCORE_START accepted in cold state', scoreStart.status === 200, scoreStart.text.slice(0, 160));
     check('score active', !!(st(scoreStart) && st(scoreStart).score) && st(scoreStart).score.active === true, JSON.stringify(st(scoreStart) && st(scoreStart).score));
     check('score plan selected', !!(st(scoreStart) && st(scoreStart).score) && Number(st(scoreStart).score.mode) === 2, JSON.stringify(st(scoreStart) && st(scoreStart).score && st(scoreStart).score.mode));
 
-    for (let i = 0; i < 10; i++) await cmd('TICK 1');
+    await advanceStudent('tank', 10);
     const scored = await cmd('STATE');
     check('score clock runs', !!(st(scored) && st(scored).score) && Number(st(scored).score.sessionT) > 0, JSON.stringify(st(scored) && st(scored).score && st(scored).score.sessionT));
 
@@ -452,7 +472,7 @@ async function main() {
 
     const hxStart = await cmdHx('START');
     check('hx START accepted', hxStart.status === 200 && st(hxStart).running === true, hxStart.text.slice(0, 160));
-    for (let i = 0; i < 10; i++) await cmdHx('TICK 1');
+    await advanceStudent('hx', 10);
     hxState = await api('/api/state', { cookie: state.hxStudent });
     check('hx simulation advances', Number(hxState.json.state.sim_time) >= 10, 'sim_time ' + (hxState.json.state && hxState.json.state.sim_time));
     check('hx outlet temperature reacts', Number(hxState.json.state.ti1104) > 0, 'ti1104 ' + (hxState.json.state && hxState.json.state.ti1104));
@@ -490,8 +510,8 @@ async function main() {
     check('hx teacher login 200', hxTeacherLogin.status === 200, hxTeacherLogin.status + ' ' + hxTeacherLogin.text.slice(0, 160));
     state.hxTeacher = hxTeacherLogin.cookie;
     const hxLoad = await api('/api/teacher/load-project', {
-      method: 'POST', cookie: state.hxTeacher,
-      body: { classId: state.classId, studentId: STUDENT_ID, slot: 2 },
+      method: 'POST', cookie: state.teacher,
+      body: { classId: state.classId, studentId: STUDENT_ID, slot: 2, model: 'hx' },
     });
     check('teacher loads hx student project', hxLoad.status === 200 && hxLoad.json.ok === true, hxLoad.text.slice(0, 200));
     const hxTeacherState = await api('/api/state', { cookie: state.hxTeacher });
@@ -572,11 +592,11 @@ async function main() {
     const crossTeacherLogin = await api('/api/login', { method: 'POST', body: { role: 'teacher', teacherCode: TEACHER_CODE, model: 'tank' } });
     check('cross-model teacher login 200', crossTeacherLogin.status === 200 && !!crossTeacherLogin.cookie, crossTeacherLogin.text.slice(0, 160));
     const crossLoad = await api('/api/teacher/load-project', {
-      method: 'POST', cookie: crossTeacherLogin.cookie,
+      method: 'POST', cookie: state.teacher,
       body: { classId: state.classId, studentId: STUDENT_ID, slot: 2, model: 'hx' },
     });
     check('tank teacher can load an hx project explicitly', crossLoad.status === 200 && crossLoad.json.modelId === 'hx', crossLoad.text.slice(0, 200));
-    const crossState = await api('/api/state', { cookie: crossTeacherLogin.cookie });
+    const crossState = await api('/api/state', { cookie: state.teacher });
     check('teacher auth switches to the loaded hx engine', crossState.status === 200
       && crossState.json.modelId === 'hx' && typeof crossState.json.state.ti1104 !== 'undefined', crossState.text.slice(0, 200));
 
@@ -594,7 +614,7 @@ async function main() {
     let guardOk = true;
     try { models.assertStateBelongsToModel(tankBin, 'tank'); } catch (err) { guardOk = false; }
     check('tank state accepted on the tank model', guardOk);
-    fs.rmSync(magicDir, { recursive: true, force: true });
+    removeTestDir(magicDir);
 
     // 名单变更要同时清掉学生在两个模型上的会话。
     const addHx = await api('/api/teacher/classes/' + state.classId + '/students', {
@@ -620,17 +640,20 @@ async function main() {
     failures.push('exception :: ' + (err && err.stack ? err.stack : err));
     console.log('  FAIL  exception :: ' + (err && err.message ? err.message : err));
   } finally {
+    for (const cookie of loggedInCookies) {
+      try { await api('/api/logout', { method: 'POST', cookie, body: {} }); } catch {}
+    }
+    await sleep(1500);
     try { child.kill(); } catch (err) { /* ignore */ }
-    await sleep(800);
-    const leaked = enginePids().filter(function (pid) { return before.indexOf(pid) < 0; });
+    await sleep(200);
+    const leaked = enginePids(dataDir).filter(function (pid) { return before.indexOf(pid) < 0; });
+    check('all test kernels exited without leaks', leaked.length === 0, leaked.join(','));
     if (leaked.length) {
       console.log('cleaning leaked engine pids: ' + leaked.join(','));
-      try {
-        execSync('powershell -NoProfile -Command "Stop-Process -Id ' + leaked.join(',') + ' -Force -ErrorAction SilentlyContinue"', { stdio: 'ignore' });
-      } catch (err) { /* ignore */ }
+      for (const pid of leaked) { try { process.kill(pid, 'SIGKILL'); } catch {} }
     }
     if (!KEEP_DATA) {
-      try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch (err) { /* ignore */ }
+      removeTestDir(dataDir);
     }
   }
 

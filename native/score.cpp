@@ -1,4 +1,5 @@
 #include "score.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -194,9 +195,19 @@ void ScoreInit() {
 void ScoreColdReset() {
     const ScoreMode mode = g_score.mode;
     const int tank = g_score.tank;
+    // Keep configuration separate from the runtime reset without changing the persisted struct.
+    const double du = g_score.dur_unit_s, ds = g_score.dur_sys_s;
+    const double bt = g_score.band_tank_pct, bh = g_score.band_hx_c;
+    const bool disturb = g_score.disturb_enable;
+    const double at = g_score.disturb_at_s, delta = g_score.disturb_delta;
+    const int mv = g_score.disturb_mv;
     ScoreInit();
     g_score.mode = mode;
     g_score.tank = (tank < 0 || tank > 2) ? 2 : tank;
+    g_score.dur_unit_s = du; g_score.dur_sys_s = ds;
+    g_score.band_tank_pct = bt; g_score.band_hx_c = bh;
+    g_score.disturb_enable = disturb;
+    g_score.disturb_at_s = at; g_score.disturb_delta = delta; g_score.disturb_mv = mv;
 }
 
 void ScoreBeginSession() {
@@ -215,6 +226,14 @@ void ScoreEndSession() {
 }
 
 bool ScoreSessionActive() { return g_score.session_active; }
+void ScoreFinishSession() {
+    if (!g_score.session_active) return;
+    g_score.session_active = false;
+    g_score.session_finished = true;
+    g_score.session_just_end = true;
+    for (auto& tank : g_score.tank_score) tank.cat = {};
+    g_score.system_score.cat = {};
+}
 double ScoreSessionTime() { return g_score.session_t; }
 bool ScoreSessionFinished() { return g_score.session_finished; }
 
@@ -534,9 +553,10 @@ void ScoreTick(const TankSystem* s, double dt) {
 
     for (int pv = 0; pv < 3; ++pv) {
         const double sp = level_sp(s, pv);
-        const double q_ref = TorricelliQ(sp / 100.0 * TANK_H_MM * MM2M) * M3S2LMIN;
         const double valve_pct = (pv == 0) ? s->valve_12 : (pv == 1 ? s->valve_23 : s->valve_out);
-        q.ref_outflow_volume_l[pv] += q_ref * clampd_s(valve_pct, 0.0, 100.0) / 100.0 * vol_scale;
+        const double q_ref = GravityPipeQ(pv, sp / 100.0 * TANK_H_MM * MM2M,
+            valve_pct) * M3S2LMIN;
+        q.ref_outflow_volume_l[pv] += q_ref * vol_scale;
     }
 
     const double eq = (std::fabs(qin - q12) + std::fabs(q12 - q23) + std::fabs(q23 - qout)) / 3.0;

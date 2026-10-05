@@ -1,4 +1,5 @@
 #pragma once
+#include "pipe.h"
 
 // ---- Layout (aligned with Test5-1.1 BoilerPID) ----
 constexpr int    BASE_W = 1366;
@@ -91,13 +92,22 @@ constexpr double TANK_H_MM   = 1000.0;
 constexpr double OUT_D_MM    = 10.0;
 constexpr double CD_ORIFICE  = 0.61;
 constexpr double G_MPS2      = 9.81;
+// Fixed teaching geometry: FV102 (T1 -> top of T2), FV103 (T2 -> top of T3),
+// FV104 (T3 -> atmospheric drain). Container dimensions remain unchanged.
+// Length/diameter/roughness determine Darcy-Weisbach friction; minor_loss is
+// additional fixed fitting resistance. The original Cd defines valve loss.
+constexpr GravityPipe GRAVITY_PIPES[3] = {
+    {2.0, OUT_D_MM * MM2M, 1.5e-6, 1.5, 1.0 / (CD_ORIFICE * CD_ORIFICE)},
+    {3.0, OUT_D_MM * MM2M, 1.5e-6, 1.5, 1.0 / (CD_ORIFICE * CD_ORIFICE)},
+    {4.0, OUT_D_MM * MM2M, 1.5e-6, 1.5, 1.0 / (CD_ORIFICE * CD_ORIFICE)},
+};
 constexpr double L_MAX_MM    = 1000.0;
 constexpr double L_MIN_MM    = 0.0;
 
 constexpr double Q_PUMP_MAX_LMIN = 20.0;
 constexpr double T_PUMP_S        = 2.0;
 // 阀门公称通流参考值。实际流量仍由上游压头决定：FV101 受泵（20 L/min）驱动，
-// FV102/103/104 受罐体液位（Torricelli）驱动，因此相同流量下开度不必相同。
+// FV102/103/104 受罐体水头及各段管道阻力驱动，因此相同流量下开度不必相同。
 constexpr double Q_VALVE_MAX_LMIN= 15.0;
 constexpr double T_STROKE_S      = 30.0;
 constexpr double VALVE_RATE_PCT_S= 100.0 / 30.0;

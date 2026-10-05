@@ -109,9 +109,8 @@ void InitSimulation(TankSystem* s);
 void UpdateSimulation(TankSystem* s);           // 1 s main step (10 substeps)
 void UpdateSimulationSub(TankSystem* s, double dt_sub); // expose for selftest
 void RunControlStep(TankSystem* s, double dt);  // PID once per main step
-double TorricelliQ(double h_m);                 // m^3/s at h, full open orifice
+double GravityPipeQ(int pipe, double head_m, double opening_pct); // m^3/s
 double TankAreaM2();
-double OrificeAreaM2();
 void ApplyPidGains(TankSystem* s);              // scheme-dependent defaults
 void ApplyCascadeGains(TankSystem* s);          // 串级(B)：按主控/非主控角色整定并做无扰偏置
 double CascadeMasterBias(const TankSystem* s);  // 当前主控罐的解析稳态前馈（% 泵可用流量）

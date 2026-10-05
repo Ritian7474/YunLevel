@@ -19,9 +19,14 @@
 - 接手第一入口：`docs/交接须知的注意文件.md`
 - 文档索引与历史报告说明：`docs/文档索引与阅读顺序.md`
 - 当前项目进度：`docs/项目进度.md`
+- 管道物理模型与固定对象整定验证：`docs/管道水力模型与PID整定验证.md`
 - 部署与 ECS：`docs/部署说明.md`
 
 历史测试报告只用于回溯问题，不代表当前待办；当前能力和约束以交接文件、项目进度和功能手册为准。
+
+2026-10-03 核心修复的规则、接口、兼容约定和验证范围见 [发布说明](docs/核心可靠性修复-发布说明.md)。
+学生采用教师评分规则；关闭/刷新/退出或连续90秒无心跳会结束本轮并记零分，恢复方案不能续接评分。
+教师后续登录只观察，控制窗口退出后按登录顺序接任，演示继续运行。
 
 ## 目录结构
 
@@ -78,6 +83,19 @@ npm start                 # 启动网关
 
 **本机没有 g++？** 用 Docker，镜像内会自动编译内核（见下一节）。
 
+Windows 也支持已安装的 Visual Studio C++ 工具和 Windows SDK，编译脚本可自动发现。
+
+## 统一回归
+
+Linux 使用 Node 24 和 g++；Windows 在 PowerShell 7 中执行。项目无 npm 依赖。
+
+```powershell
+npm test
+```
+
+该入口重新编译两个内核及HX自检，检查全部JavaScript语法，运行专项回归、HX自检与完整端到端回归。
+GitHub Actions 使用相同入口作为Linux门禁。测试创建隔离数据目录，验证双模型进程均退出，不连接已有服务器。
+
 > 所有数据都写在本机 `data/` 目录，运行过程不访问任何外部服务或云平台。
 
 ## Docker 运行（可选，部署到服务器时用）
@@ -121,11 +139,12 @@ docker compose exec yunlevel ls -lh /app/bin
 运行期数据都在 `data/`（容器里是挂载卷 `/app/data`）：
 
 - `data/classes.json`：班级、班级码和学生名单
-- `data/state/<班级+学号哈希>.bin`：仿真状态快照，下次登录自动恢复成**未启动**状态
+- `data/state/<班级+学号哈希>.bin`：已有仿真快照布局；学生每次登录进入冷态，主动恢复也不恢复评分运行态
 - `data/history/<班级+学号哈希>.json`：曲线历史（最多 1800 点）
 - `data/hx-state/`、`data/hx-history/`：换热器状态与历史，目录与液位完全隔离
 - `data/hx-submissions/`、`data/hx-teacher_backups/`：换热器云端方案和教师备份
 - `data/score_records.jsonl`：评分记录，教师页面可筛选、导出或清空 CSV
+- `data/active-attempts.json`：进行中的评分编号、配置版本和最新状态；重启时封存为异常结束
 
 备份只需打包 `data/` 目录；升级镜像不会影响数据。
 
@@ -135,6 +154,8 @@ docker compose exec yunlevel ls -lh /app/bin
 | --- | --- | --- |
 | POST | `/api/login` | 学生/教师登录，成功后写入 HttpOnly Cookie |
 | POST | `/api/logout` | 退出并保存状态 |
+| POST | `/api/session/heartbeat` | 携带sessionId/attemptId，每15秒刷新会话心跳 |
+| POST | `/api/session/end` | 校验会话/评分编号，幂等结束并释放会话 |
 | GET | `/api/me` | 当前登录身份 |
 | GET | `/api/state` | 当前仿真状态（含回路、PID、评分） |
 | GET | `/api/history` | 曲线历史 |

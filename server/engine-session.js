@@ -11,6 +11,7 @@ const {
 const { DEFAULT_MODEL_ID, modelSpec } = require('./models');
 
 const HISTORY_LIMIT = 1800;
+const MAX_WAITING_COMMANDS = 64;
 // 历史字段改为按模型取（见 server/models.js）。
 // tank 的取值与改造前完全一致，顺序也不变。
 const HISTORY_FIELDS = modelSpec(DEFAULT_MODEL_ID).historyFields;
@@ -29,6 +30,7 @@ class EngineSession extends EventEmitter {
       ? options.historyFields
       : modelSpec(this.modelId).historyFields;
     this.enginePath = options.enginePath;
+    this.engineArgs = options.engineArgs;
     this.dataDir = options.dataDir;
     this.stateDir = options.stateDir;
     this.historyDir = options.historyDir;
@@ -39,6 +41,11 @@ class EngineSession extends EventEmitter {
     this.child = null;
     this.stdoutBuffer = '';
     this.pending = [];
+    this.inflight = null;
+    this.stopping = false;
+    this.exited = false;
+    this.failure = null;
+    this.stopPromise = null;
     this.lastState = null;
     this.lastSeen = Date.now();
     this.closed = false;
@@ -113,7 +120,7 @@ class EngineSession extends EventEmitter {
       name: this.name,
       className: this.className,
       ownerRole: this.ownerRole,
-      online: !this.closed,
+      online: !this.closed && !this.stopping,
       lastSeen: this.lastSeen,
       running: !!s.running,
       paused: !!s.paused,
@@ -144,19 +151,24 @@ class EngineSession extends EventEmitter {
       scoreTime: Number(score.sessionT || 0),
       scoreFinished: !!score.finished,
       scoreTotal: Number(score.total || 0),
+      attemptId: score.attemptId || null,
+      configRevision: score.configRevision ?? null,
+      endReason: score.endReason || null,
       control: Number(score.control || 0),
       safety: Number(score.safety || 0),
       benefit: Number(score.benefit || 0),
       operation: Number(score.operation || 0),
       target: Number(score.target || 0),
       safetyDeduction: Number(score.safetyDeduction || 0),
-      durationS: Number(score.mode || 0) === 2 ? 1500 : (Number(score.mode || 0) === 1 ? 480 : 0),
+      durationS: Number(score.durationS || 0),
     };
   }
 
   start() {
-    if (this.child) return;
-    const args = ['--state-file', this.stateFile];
+    if (this.child) return this.startPromise;
+    if (this.exited) return Promise.reject(new Error('engine session has exited'));
+    const args = this.engineArgs || ['--state-file', this.stateFile,
+      ...(this.ownerRole === 'student' ? ['--no-pid-bias'] : [])];
     this.child = spawn(this.enginePath, args, {
       cwd: path.dirname(this.enginePath),
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -169,42 +181,60 @@ class EngineSession extends EventEmitter {
       const text = String(chunk).trim();
       if (text) this.emit('log', text);
     });
-    this.child.on('error', (err) => this._fail(err));
-    this.child.on('exit', (code) => this._fail(new Error(`engine exited ${code}`)));
+    this.child.stdin.on('error', (err) => this._abort(err));
+    this.child.on('error', (err) => this._abort(err));
+    this.child.on('exit', (code, signal) => this._fail(new Error(`engine exited ${code ?? signal}`)));
+    this.child.on('close', () => this._fail(new Error('engine closed')));
     this.closed = false;
-    return this.send('STATE');
+    this.startPromise = this.send('STATE');
+    return this.startPromise;
   }
 
   send(command, timeoutMs = 8000) {
-    if (this.closed || !this.child) {
-      return Promise.reject(new Error('engine session is not running'));
+    return this._enqueue(command, timeoutMs, false);
+  }
+
+  _enqueue(command, timeoutMs, stoppingCommand) {
+    if (this.closed || this.failure || !this.child || (this.stopping && !stoppingCommand)) {
+      return Promise.reject(this.failure || Object.assign(new Error('内核会话正在停止或已退出'), { code: 'ENGINE_CLOSED', statusCode: 503 }));
     }
     if (!/^[A-Z_]+(?: (?:[A-Za-z_]+|[0-9eE+\-.]+))*$/.test(command)) {
       return Promise.reject(new Error('invalid command'));
     }
+    if (this.pending.length >= MAX_WAITING_COMMANDS) {
+      return Promise.reject(Object.assign(new Error('内核等待队列已满（64）'), { code: 'ENGINE_BUSY', statusCode: 503 }));
+    }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const index = this.pending.findIndex((p) => p.resolve === resolve);
-        if (index >= 0) this.pending.splice(index, 1);
-        reject(new Error(`engine timeout: ${command}`));
-      }, timeoutMs);
-      this.pending.push({
-        resolve: (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: (err) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      });
-      this.child.stdin.write(`${command}\n`, 'utf8', (err) => {
-        if (err) {
-          const item = this.pending.pop();
-          if (item) item.reject(err);
-        }
-      });
+      this.pending.push({ command, timeoutMs, resolve, reject, timer: null });
+      this._dispatch();
     });
+  }
+
+  _dispatch() {
+    if (this.inflight || this.failure || this.closed || !this.child) return;
+    const item = this.pending.shift();
+    if (!item) return;
+    this.inflight = item;
+    item.timer = setTimeout(() => this._abort(Object.assign(new Error(`engine timeout: ${item.command}`), {
+      code: 'ENGINE_TIMEOUT', statusCode: 503,
+    })), item.timeoutMs);
+    this.child.stdin.write(`${item.command}\n`, 'utf8', err => { if (err) this._abort(err); });
+  }
+
+  _rejectAll(err) {
+    const items = this.inflight ? [this.inflight, ...this.pending] : this.pending;
+    this.inflight = null;
+    this.pending = [];
+    for (const item of items) { clearTimeout(item.timer); item.reject(err); }
+  }
+
+  _abort(err) {
+    if (this.exited || this.failure) return;
+    this.failure = Object.assign(err, { code: err.code || 'ENGINE_FAILURE', statusCode: 503 });
+    this.stopping = true;
+    this._rejectAll(this.failure);
+    this.stdoutBuffer = '';
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
   }
 
   tick(run) {
@@ -259,21 +289,27 @@ class EngineSession extends EventEmitter {
   }
 
   stop() {
-    if (!this.child || this.closed) return;
-    try {
-      this.send('SAVE', 2000).catch(() => {});
-      this.send('QUIT', 2000).catch(() => {});
-    } catch {
-      // The process may already be closing.
-    }
-    setTimeout(() => {
-      if (this.child && !this.closed) this.child.kill();
-    }, 1200).unref?.();
-    this.closed = true;
+    if (this.stopPromise) return this.stopPromise;
+    if (!this.child || this.exited) return Promise.resolve();
+    this.stopping = true;
+    this.stopPromise = new Promise(resolve => this.once('closed', resolve));
+    this.killTimer = setTimeout(() => {
+      // closed reflects actual process exit, not the intent to stop.
+      if (this.child && this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
+    }, 1200);
+    this.killTimer.unref?.();
+    (async () => {
+      try {
+        await this._enqueue('SAVE', 1000, true);
+        await this._enqueue('QUIT', 1000, true);
+      } catch (err) { this._abort(err); }
+    })();
     this.saveHistory();
+    return this.stopPromise;
   }
 
   _onStdout(chunk) {
+    if (this.failure || this.exited) return;
     this.stdoutBuffer += String(chunk);
     let index;
     while ((index = this.stdoutBuffer.indexOf('\n')) >= 0) {
@@ -284,10 +320,17 @@ class EngineSession extends EventEmitter {
       try {
         message = JSON.parse(line);
       } catch {
-        this.emit('log', `bad engine json: ${line.slice(0, 160)}`);
-        continue;
+        this._abort(Object.assign(new Error('bad engine JSON'), { code: 'ENGINE_PROTOCOL' }));
+        return;
       }
-      const item = this.pending.shift();
+      const item = this.inflight;
+      this.inflight = null;
+      if (!item || !['state', 'error'].includes(message.type)) {
+        if (item) { clearTimeout(item.timer); item.reject(new Error('unexpected engine reply')); }
+        this._abort(Object.assign(new Error('unexpected engine reply'), { code: 'ENGINE_PROTOCOL' }));
+        return;
+      }
+      clearTimeout(item.timer);
       if (item) {
         if (message.type === 'error') {
           const error = new Error(message.message || 'engine error');
@@ -302,15 +345,18 @@ class EngineSession extends EventEmitter {
         this.emit('state', message);
       }
     }
+    this._dispatch();
   }
 
   _fail(err) {
-    if (this.closed && this.child === null) return;
+    if (this.exited) return;
+    this.exited = true;
     this.closed = true;
+    clearTimeout(this.killTimer);
     this.child = null;
-    for (const item of this.pending.splice(0)) item.reject(err);
-    this.emit('closed', err);
+    this._rejectAll(this.failure || Object.assign(err, { code: 'ENGINE_EXITED', statusCode: 503 }));
+    this.emit('closed', this.failure || err);
   }
 }
 
-module.exports = { EngineSession, HISTORY_FIELDS, HISTORY_LIMIT };
+module.exports = { EngineSession, HISTORY_FIELDS, HISTORY_LIMIT, MAX_WAITING_COMMANDS };

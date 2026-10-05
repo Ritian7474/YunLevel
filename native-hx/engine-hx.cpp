@@ -39,6 +39,7 @@ struct Engine {
 };
 
 Engine g_engine;
+bool g_bias_allowed = true;
 
 double clampd(double v, double lo, double hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -96,7 +97,7 @@ void load_state() {
     g_engine.sys = saved;
     g_hxScore = savedScore;
     g_hxScore.session_just_end = false;
-    g_engine.bias = h.bias != 0u;
+    g_engine.bias = g_bias_allowed && h.bias != 0u;
     g_engine.scenario = (int)h.scenario;
     g_usePidBias = g_engine.bias;
 }
@@ -261,6 +262,7 @@ void emit_state(bool score_ended = false) {
     json_num("sessionT", g_hxScore.session_t, sf);
     json_num("runT", g_hxScore.run_t, sf);
     json_num("activeT", g_hxScore.active_t, sf);
+    json_num("durationS", HxScoreSessionDuration(), sf);
     json_num("total", g_hxScore.unit_score.cat.total, sf);
     json_num("operation", g_hxScore.unit_score.cat.operation, sf);
     json_num("control", g_hxScore.unit_score.cat.control, sf);
@@ -408,7 +410,7 @@ void process_line(const std::string& line) {
     } else if (cmd == "SET_BIAS") {
         int v = 0;
         iss >> v;
-        g_engine.bias = v != 0;
+        g_engine.bias = g_bias_allowed && v != 0;
         g_usePidBias = g_engine.bias;
         state_changed = true;
     } else if (cmd == "SET_MODE") {
@@ -641,6 +643,7 @@ void process_line(const std::string& line) {
             state_changed = true;
         } else {
             emit_error("INIT_TEMP_RUNNING", "请先回到冷态，再改初始温度");
+            return;
         }
     } else if (cmd == "SET_INLET_TEMP") {
         double t = 400.0;
@@ -658,8 +661,8 @@ void process_line(const std::string& line) {
         HxScoreSetConfig(du, ds, bh);
     } else if (cmd == "SCORE_MODE") {
         int mode = 0; iss >> mode;
-        if (s->running) {
-            emit_error("SCORE_MODE_RUNNING", "运行中不能切换评分方案");
+        if (HxScoreSessionActive()) {
+            emit_error("SCORE_MODE_RUNNING", "评分中不能切换评分方案");
             return;
         }
         if (mode < HX_SCORE_OFF || mode > HX_SCORE_SYSTEM) {
@@ -683,6 +686,12 @@ void process_line(const std::string& line) {
             return;
         }
         HxScoreBeginSession();
+        state_changed = true;
+    } else if (cmd == "SCORE_FINISH") {
+        HxScoreFinishSession();
+        score_ended = HxScoreTakeFinishedEvent();
+        s->running = false;
+        s->paused = false;
         state_changed = true;
     } else if (cmd == "SCORE_END") {
         HxScoreEndSession();
@@ -716,6 +725,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--scenario" && i + 1 < argc) {
             g_engine.scenario = std::atoi(argv[++i]);
             reset_to_cold();
+        } else if (arg == "--no-pid-bias") {
+            g_bias_allowed = false;
         }
     }
     load_state();

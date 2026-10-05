@@ -35,6 +35,7 @@ const MODEL_SPECS = {
   tank: {
     modelId: 'tank',
     displayName: '三级液位',
+    scorePolicy: { targetCommand: 'SET_SP', initCommand: null },
     stateMagic: TANK_STATE_MAGIC,
     historyFields: TANK_HISTORY_FIELDS,
     stateSubdir: 'state',
@@ -75,6 +76,7 @@ const MODEL_SPECS = {
   hx: {
     modelId: 'hx',
     displayName: '换热器',
+    scorePolicy: { targetCommand: 'SET_PVX_SP', initCommand: 'SET_INIT_TEMP' },
     stateMagic: HX_STATE_MAGIC,
     historyFields: HX_HISTORY_FIELDS,
     // 目录与液位分开：两套状态/历史/云端方案互不可见。

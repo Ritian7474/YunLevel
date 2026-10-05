@@ -8,6 +8,7 @@ const {
   writeJsonAtomic,
 } = require('./storage');
 const { DEFAULT_MODEL_ID, modelExportSpec, modelSpec } = require('./models');
+const { mergeScoreConfig, scoreSystemValue } = require('./score-config');
 
 const PROJECT_SLOTS = 4;
 const IMAGE_LIMIT_BYTES = 4 * 1024 * 1024;
@@ -150,18 +151,24 @@ class SnapshotStore {
         tank: savedModels.tank !== false,
         hx: savedModels.hx === true,
       },
-      scoreConfig: (saved.scoreConfig && typeof saved.scoreConfig === 'object') ? saved.scoreConfig : {},
+      scoreConfig: mergeScoreConfig(null, saved.scoreConfig || {}, true),
+      scoreSystemOn: [true,1,'1'].includes(saved.scoreSystemOn),
+      scoreConfigRevision: Number.isSafeInteger(saved.scoreConfigRevision) ? saved.scoreConfigRevision : 0,
       updatedAt: saved.updatedAt || null,
     };
   }
 
   getSettings() {
     if (this.settingsSource) return this.settingsSource.getSettings();
-    return { ...this.settings };
+    return JSON.parse(JSON.stringify(this.settings));
   }
 
   setSettings(patch = {}) {
     if (this.settingsSource) return this.settingsSource.setSettings(patch);
+    const hasConfig = Object.prototype.hasOwnProperty.call(patch, 'scoreConfig');
+    const hasSwitch = Object.prototype.hasOwnProperty.call(patch, 'scoreSystemOn');
+    const nextConfig = hasConfig ? mergeScoreConfig(this.settings.scoreConfig, patch.scoreConfig) : this.settings.scoreConfig;
+    const nextSwitch = hasSwitch ? scoreSystemValue(patch.scoreSystemOn) : this.settings.scoreSystemOn;
     if (Object.prototype.hasOwnProperty.call(patch, 'allowStudentUpload')) {
       this.settings.allowStudentUpload = patch.allowStudentUpload === true;
     }
@@ -174,11 +181,10 @@ class SnapshotStore {
       }
     }
     // 评分细则整包合并保存，避免 POST /api/teacher/settings 静默丢掉 scoreConfig
-    if (patch.scoreConfig && typeof patch.scoreConfig === 'object') {
-      this.settings.scoreConfig = {
-        ...(this.settings.scoreConfig || {}),
-        ...patch.scoreConfig,
-      };
+    if (hasConfig || hasSwitch) {
+      this.settings.scoreConfig = nextConfig;
+      this.settings.scoreSystemOn = nextSwitch;
+      this.settings.scoreConfigRevision += 1;
     }
     this.settings.updatedAt = new Date().toISOString();
     writeJsonAtomic(this.settingsFile, this.settings);
