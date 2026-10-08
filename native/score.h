@@ -122,6 +122,7 @@ void ScoreInit();
 void ScoreColdReset();
 void ScoreBeginSession();      // 开始评分：清评分数据并把评分时间归零
 void ScoreEndSession();        // 结束评分会话
+void ScoreFinishSession();     // 网关异常结束：保留已用时间并封存零分
 bool ScoreSessionActive();
 double ScoreSessionTime();
 bool ScoreSessionFinished();   // 评分限时已到（可查看评分结果）

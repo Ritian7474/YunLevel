@@ -1,12 +1,16 @@
 const $ = (id) => document.getElementById(id);
 const api = async (url, options = {}) => {
+  if (app.me?.role === 'teacher' && app.me.viewOnly && options.method && options.method !== 'GET'
+      && !['/api/logout', '/api/session/heartbeat', '/api/session/end', '/api/teacher/active-model', '/api/teacher/cloud-export'].includes(url)) {
+    throw new Error('当前窗口只观察；控制窗口退出后按登录顺序接任。');
+  }
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     credentials: 'same-origin',
     ...options,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status, code: data.code });
   return data;
 };
 
@@ -1190,6 +1194,8 @@ function updateState(state) {
   updateScoreTabAccess();
   renderStudentCloudStatus();
   if (app.view === 'curves') scheduleStudentCharts();
+  syncStudentRuleAccess();
+  syncTeacherObservation();
 }
 
 function syncSchemeControls(state) {
@@ -1525,7 +1531,7 @@ async function applyLoop(index) {
   const loop = app.state?.loops?.[index];
   if (!loop) return;
   const form = readLoopForm(index);
-  if (Number(loop.sp) !== form.sp) await sendCommand(`SET_SP ${loop.pv} ${form.sp}`);
+  if (app.me?.role === 'teacher' && Number(loop.sp) !== form.sp) await sendCommand(`SET_SP ${loop.pv} ${form.sp}`);
   await sendCommand(`SET_PID loop ${index} ${form.kp} ${form.ti} ${form.td} ${loop.action} ${loop.manual ? 1 : 0} ${form.manualOut}`);
   clearLoopDirty(index);
   toast('参数已应用');
@@ -1545,7 +1551,7 @@ async function applyCascade(index) {
   const c = app.state?.cascades?.[index];
   if (!c) return;
   const form = readCascadeForm(index);
-  if (Number(c.outerSp) !== form.outerSp) await sendCommand(`SET_PVX_SP ${c.outer} ${form.outerSp}`);
+  if (app.me?.role === 'teacher' && Number(c.outerSp) !== form.outerSp) await sendCommand(`SET_PVX_SP ${c.outer} ${form.outerSp}`);
   await sendCommand(`SET_PID outer ${index} ${form.outerKp} ${form.outerTi} ${form.outerTd} ${c.outerAction} ${c.outerManual ? 1 : 0} ${c.outerOut}`);
   await sendCommand(`SET_PID inner ${index} ${form.innerKp} ${form.innerTi} ${form.innerTd} ${c.innerAction} ${c.innerManual ? 1 : 0} ${c.innerOut}`);
   clearCascadeDirty(index);
@@ -1966,7 +1972,14 @@ function renderScore(state) {
   $('scoreSubtitle').textContent = s.active
     ? `评分时间 ${number(s.sessionT, 0)} s`
     : (s.finished ? '评分已结束，可查看结果。' : (mode ? '评分方案已选择，点击“开始评分”后开始计时。' : '请先选择评分方案，再点击“开始评分”。'));
+  if (s.finished && s.endReason && s.endReason !== 'completed') $('scoreSubtitle').textContent = `本轮已结束，成绩为零分（${s.endReason}）；回到冷态后才能开始新一轮。`;
   $('scoreTotal').textContent = number(s.total, 1);
+  if (app.me?.role === 'student' && s.effectiveConfig) {
+    const c = s.effectiveConfig;
+    const duration = c.mode === 2 ? c.durationSystem : c.durationUnit;
+    const target = c.targets?.[c.tank] ?? c.targets?.[0];
+    $('scoreSubtitle').textContent += ` 教师规则 v${s.configRevision}：${duration} s，目标 ${target}，带宽 ${modelSpec().modelId === 'hx' ? c.bandHx : c.bandTank}。`;
+  }
   $('scoreOp').textContent = number(s.operation, 1);
   $('scoreCtrl').textContent = number(s.control, 1);
   { const el = $('scoreTarget'); if (el) el.textContent = number(s.target, 1); }
@@ -3050,7 +3063,9 @@ async function connectStudent() {
   app.simEventSource.addEventListener('open', () => setConnection(true, '已连接'));
   app.simEventSource.addEventListener('settings', (e) => {
     app.cloudSettings = JSON.parse(e.data);
+    populateScoreConfig(app.cloudSettings);
     renderStudentCloudStatus();
+    syncStudentRuleAccess();
   });
   app.simEventSource.addEventListener('state', (e) => {
     const state = JSON.parse(e.data);
@@ -3075,6 +3090,11 @@ async function connectTeacher() {
 
   app.simEventSource = new EventSource('/api/stream');
   await refreshStudentCloudStatus();
+  app.simEventSource.addEventListener('identity', (e) => {
+    Object.assign(app.me, JSON.parse(e.data));
+    syncTeacherObservation();
+    toast('已接任教师控制权，演示继续运行');
+  });
   app.simEventSource.addEventListener('open', () => setConnection(true, '教师仿真已连接'));
   app.simEventSource.addEventListener('state', (e) => {
     const state = JSON.parse(e.data);
@@ -3813,6 +3833,7 @@ function wireStudentControls() {
       el.disabled = !!on;
     });
   };
+  app.refreshScoreConfigLock = refreshScoreConfigLock;
   if (scoreSystemToggle) {
     scoreSystemToggle.onclick = async () => {
       try {
@@ -3821,8 +3842,7 @@ function wireStudentControls() {
         const ret = await api('/api/teacher/settings', { method: 'POST', body: JSON.stringify(body) });
         if (ret && ret.settings) app.cloudSettings = ret.settings;
         app.cloudSettings = Object.assign({}, app.cloudSettings || {}, body);
-        if (next) await sendCommand('SCORE_MODE 1');
-        else await sendCommand('SCORE_MODE 0');
+
         refreshScoreConfigLock();
         toast(next ? '评分系统已开启，细则已锁定' : '评分系统已关闭，可修改评分细则');
       } catch (e) { toast(e.message, true); }
@@ -3832,6 +3852,7 @@ function wireStudentControls() {
   api('/api/projects').then((st) => {
     if (st && st.settings) {
       app.cloudSettings = st.settings;
+      populateScoreConfig(st.settings);
       refreshScoreConfigLock();
     }
   }).catch(() => refreshScoreConfigLock());
@@ -3926,9 +3947,11 @@ function wireStudentControls() {
         const sBandTank = Number($('sysBandTank')?.value || bt);
         const sBandHx = Number($('sysBandHx')?.value || bh);
         const initTempHx = Number($('scoreInitTempHx')?.value || 400);
-        await api('/api/teacher/settings', { method: 'POST', body: JSON.stringify({
+        const result = await api('/api/teacher/settings', { method: 'POST', body: JSON.stringify({
           scoreConfig: {
-            initTempHx,
+            initTempHx, modeTank: app.scoreObj === 'tank' ? (app.scoreMode === 'sys' ? 2 : 1) : (app.cloudSettings.scoreConfig?.modeTank || 1),
+            modeHx: app.scoreObj === 'hx' ? (app.scoreMode === 'sys' ? 2 : 1) : (app.cloudSettings.scoreConfig?.modeHx || 1),
+            tankIndex: Number($('scoreTankPick')?.value ?? 2),
             durationUnit: du, durationSystem: ds,
             bandTank: uBandTank, bandHx: uBandHx,
             sysBandTank: sBandTank, sysBandHx: sBandHx,
@@ -3937,27 +3960,14 @@ function wireStudentControls() {
             sysSp1: sSp1, sysSp2: sSp2, sysSp3: sSp3, sysSpHx: sSpHx,
           },
         })});
-        // SCORE_CFG：单对象限时/带宽 + 系统限时/系统带宽（扰动）
-        await sendCommand(`SCORE_CFG ${du} ${ds} ${uBandTank} ${uBandHx} ${da} ${dm} ${dd}`);
-        // 当前若为系统模式，再下发系统 SP/带宽；否则下发单对象 SP/带宽
-        const modeNow = Number(app.state?.score?.mode || app.state?.scoreMode || 0);
-        if (modeNow === 2) {
-          await sendCommand(`SCORE_CFG ${du} ${ds} ${sBandTank} ${sBandHx} ${da} ${dm} ${dd}`);
-          await sendCommand(`SET_SP 0 ${sSp1}`);
-          await sendCommand(`SET_SP 1 ${sSp2}`);
-          await sendCommand(`SET_SP 2 ${sSp3}`);
-          await sendCommand(`SET_PVX_SP 0 ${sSpHx}`);
-          const initTemp2 = Number($('scoreInitTempHx')?.value || 400);
-          await sendCommand(`SET_INIT_TEMP ${initTemp2}`);
-        } else {
-          await sendCommand(`SET_SP 0 ${uSp1}`);
-          await sendCommand(`SET_SP 1 ${uSp2}`);
-          await sendCommand(`SET_SP 2 ${uSp3}`);
-          await sendCommand(`SET_PVX_SP 0 ${uSpHx}`);
-        const initTemp = Number($('scoreInitTempHx')?.value || 400);
-        await sendCommand(`SET_INIT_TEMP ${initTemp}`);
-        }
-        toast('单对象 / 系统 评分配置已应用');
+        app.cloudSettings = result.settings;
+        populateScoreConfig(result.settings);
+        const failed = (result.applications || []).filter(item => item.status === 'failed').length;
+        const pending = (result.applications || []).filter(item => item.status === 'pending').length;
+        const snapshot = await api('/api/state');
+        updateState(snapshot.state || snapshot);
+        toast(failed ? '配置已保存，' + failed + ' 个会话应用失败，请重试' : pending ? '配置已保存，' + pending + ' 个会话下一轮生效' : '评分配置已保存并应用', !!failed);
+
       } catch (e) { toast(e.message, true); }
     };
   }
@@ -4006,7 +4016,7 @@ function wireStudentControls() {
       if (state.running || Number(state.sim_time || 0) > 0.0001) return toast('请先回到冷态，再开始评分');
       if (!confirm('开始评分会清空回路与泵阀，并开始计时，是否继续？')) return;
       await sendCommand('SCORE_START');
-      toast('评分已开始，配置已清空，请重新搭建回路或使用教师模板');
+      toast('评分已开始，请按教师目标重新搭建回路并整定参数');
     } catch (e) { toast(e.message, true); }
   };
   document.querySelectorAll('[data-score-tank]').forEach((btn) => {
@@ -4024,6 +4034,24 @@ function wireStudentControls() {
       if (app.view === 'curves') scheduleStudentCharts();
     };
   }
+}
+
+function populateScoreConfig(settings) {
+  const cfg = settings?.scoreConfig || {};
+  const fields = { durationUnit: 'scoreDurUnit', durationSystem: 'scoreDurSys', bandTank: 'scoreBandTank',
+    bandHx: 'scoreBandHx', sysBandTank: 'sysBandTank', sysBandHx: 'sysBandHx',
+    disturbAt: 'scoreDistAt', disturbMv: 'scoreDistMv', disturbDelta: 'scoreDistDelta',
+    sp1: 'scoreSp1', sp2: 'scoreSp2', sp3: 'scoreSp3', spHx: 'scoreSpHx',
+    sysSp1: 'sysSp1', sysSp2: 'sysSp2', sysSp3: 'sysSp3', sysSpHx: 'sysSpHx', initTempHx: 'scoreInitTempHx' };
+  for (const [field,id] of Object.entries(fields)) {
+    const el = $(id);
+    if (el && document.activeElement !== el && el.dataset.dirty !== '1' && cfg[field] !== undefined) el.value = String(cfg[field]);
+  }
+  const tank = $('scoreTankPick');
+  if (tank) tank.value = String(cfg.tankIndex ?? 2);
+  const sp = $('scoreSpTank');
+  if (sp && document.activeElement !== sp) sp.value = String(cfg[`sp${Number(tank?.value || 0) + 1}`] ?? 50);
+  app.refreshScoreConfigLock?.();
 }
 
 function wireProjectControls() {
@@ -4313,10 +4341,26 @@ function wireLogin() {
     showLogin('');
   };
   window.addEventListener('pagehide', () => {
-    if (!app.loggingOut && app.me?.role === 'student') {
-      navigator.sendBeacon('/api/student/auto-save', new Blob(['{}'], { type: 'application/json' }));
+    if (!app.loggingOut && app.me?.sessionId) {
+      const body = JSON.stringify({ sessionId: app.me.sessionId, attemptId: app.state?.score?.attemptId || null });
+      if (!navigator.sendBeacon('/api/session/end', new Blob([body], { type: 'application/json' }))) {
+        fetch('/api/session/end', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+      }
     }
   });
+  setInterval(async () => {
+    if (!app.me?.sessionId || app.loggingOut) return;
+    try {
+      const result = await api('/api/session/heartbeat', { method: 'POST', body: JSON.stringify({
+        sessionId: app.me.sessionId, attemptId: app.state?.score?.attemptId || null,
+      }) });
+      app.me.viewOnly = result.viewOnly;
+      syncTeacherObservation();
+    } catch (err) {
+      if (err.status === 401) showLogin('会话已结束，请重新登录；评分不能续接。');
+      else setConnection(false, '心跳中断');
+    }
+  }, 15000);
   document.querySelectorAll('#mainTabs .tab').forEach((tab) => {
     tab.onclick = () => switchView(tab.dataset.view);
   });
@@ -4344,3 +4388,26 @@ function wireLogin() {
     showLogin('');
   }
 })();
+
+function syncStudentRuleAccess() {
+  if (app.me?.role !== 'student') return;
+  document.querySelectorAll('[data-field="sp"], [data-field="outerSp"]').forEach(el => { el.readOnly = true; el.title = '目标由教师设定'; });
+  document.querySelectorAll('#scoreOffBtn, #scoreTankBtn, #scoreSystemBtn, [data-score-tank]').forEach(el => { el.disabled = true; el.title = '评分方案由教师设定'; });
+  const start = $('scoreStartBtn');
+  if (start) { start.disabled = !app.cloudSettings.scoreSystemOn || !!app.state?.score?.active || !!app.state?.score?.finished; start.title = '按教师规则开始新一轮评分；已结束时先回到冷态'; }
+}
+
+function syncTeacherObservation() {
+  if (app.me?.role !== 'teacher') return;
+  $('userLine').textContent = app.me.viewOnly ? '教师教学演示 · 只观察' : '教师教学演示 · 控制窗口';
+  const selectors = '#startBtn,#pauseBtn,#resetBtn,#presetBtn,#highScoreBtn,#currentSaveBtn,#currentRestoreBtn,#cloudUploadBtn,#cloudRestoreBtn,#applyManualBtn,#biasBtn,#clearLoopsBtn,#addLoopBtn,#curveClearBtn,#scoreOffBtn,#scoreTankBtn,#scoreSystemBtn,#scoreStartBtn,#teacherScoreConfig input,#teacherScoreConfig select,#teacherScoreConfig button,#toggleHxModelBtn,#toggleStudentUploadBtn,#clearRecordsBtn,#restoreTeacherBackupBtn,#createClassBtn,#deleteClassBtn,#saveClassBtn,#addStudentBtn,#importMergeBtn,#importReplaceBtn,[data-cloud-load],[data-student-save],[data-student-delete],[data-cmd],[data-scheme],[data-field],#buildType,#buildPv,#buildMv,#buildInner';
+  document.querySelectorAll(selectors).forEach(el => {
+    if (app.me.viewOnly) {
+      if (!el.hasAttribute('data-observer-disabled')) el.dataset.observerDisabled = String(el.disabled);
+      el.disabled = true;
+    } else if (el.hasAttribute('data-observer-disabled')) {
+      el.disabled = el.dataset.observerDisabled === 'true';
+      delete el.dataset.observerDisabled;
+    }
+  });
+}

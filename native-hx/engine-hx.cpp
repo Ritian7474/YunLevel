@@ -261,6 +261,7 @@ void emit_state(bool score_ended = false) {
     json_num("sessionT", g_hxScore.session_t, sf);
     json_num("runT", g_hxScore.run_t, sf);
     json_num("activeT", g_hxScore.active_t, sf);
+    json_num("durationS", HxScoreSessionDuration(), sf);
     json_num("total", g_hxScore.unit_score.cat.total, sf);
     json_num("operation", g_hxScore.unit_score.cat.operation, sf);
     json_num("control", g_hxScore.unit_score.cat.control, sf);
@@ -641,6 +642,7 @@ void process_line(const std::string& line) {
             state_changed = true;
         } else {
             emit_error("INIT_TEMP_RUNNING", "请先回到冷态，再改初始温度");
+            return;
         }
     } else if (cmd == "SET_INLET_TEMP") {
         double t = 400.0;
@@ -658,8 +660,8 @@ void process_line(const std::string& line) {
         HxScoreSetConfig(du, ds, bh);
     } else if (cmd == "SCORE_MODE") {
         int mode = 0; iss >> mode;
-        if (s->running) {
-            emit_error("SCORE_MODE_RUNNING", "运行中不能切换评分方案");
+        if (HxScoreSessionActive()) {
+            emit_error("SCORE_MODE_RUNNING", "评分中不能切换评分方案");
             return;
         }
         if (mode < HX_SCORE_OFF || mode > HX_SCORE_SYSTEM) {
@@ -683,6 +685,12 @@ void process_line(const std::string& line) {
             return;
         }
         HxScoreBeginSession();
+        state_changed = true;
+    } else if (cmd == "SCORE_FINISH") {
+        HxScoreFinishSession();
+        score_ended = HxScoreTakeFinishedEvent();
+        s->running = false;
+        s->paused = false;
         state_changed = true;
     } else if (cmd == "SCORE_END") {
         HxScoreEndSession();

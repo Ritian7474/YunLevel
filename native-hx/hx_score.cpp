@@ -1,5 +1,6 @@
 #include "hx_score.h"
 
+#include <algorithm>
 #include <cmath>
 
 // 限时/带宽：教师 SCORE_CFG 可配
@@ -9,6 +10,10 @@ double HX_BAND_TAIL_RATIO = 0.35;
 double HX_TARGET_BAND_C = 5.0;
 
 HxScoreState g_hxScore;
+
+double HxScoreSessionDuration() {
+    return g_hxScore.mode == HX_SCORE_SYSTEM ? HX_SCORE_DURATION_SYS : HX_SCORE_DURATION_S;
+}
 
 void HxScoreSetConfig(double dur_unit, double dur_sys, double band_hx) {
     if (dur_unit > 1.0) HX_SCORE_DURATION_S = dur_unit;
@@ -196,7 +201,7 @@ void update_report(const HxSystem* s) {
     if (q.settle_latch && q.settle_time <= 600.0) op += 5.0;
 
     // 尾段目标/控制 50 = ρ_tail×30 + MAE12 + 超调8
-    const double tail_w = HX_BAND_TAIL_RATIO * HX_SCORE_DURATION_SYS;
+    const double tail_w = HX_BAND_TAIL_RATIO * HxScoreSessionDuration();
     double band_t = 0.0;
     for (int i = 0; i < q.err_count; ++i) {
         const int idx = (q.err_head - 1 - i + HX_ERR_WINDOW * 2) % HX_ERR_WINDOW;
@@ -274,6 +279,13 @@ void HxScoreEndSession() {
 }
 
 bool HxScoreSessionActive() { return g_hxScore.session_active; }
+void HxScoreFinishSession() {
+    if (!g_hxScore.session_active) return;
+    g_hxScore.session_active = false;
+    g_hxScore.session_finished = true;
+    g_hxScore.session_just_end = true;
+    g_hxScore.unit_score.cat = {};
+}
 bool HxScoreSessionFinished() { return g_hxScore.session_finished; }
 
 bool HxScoreTakeFinishedEvent() {
@@ -301,8 +313,8 @@ void HxScoreTick(const HxSystem* s, double dt) {
 
     // 评分时间：从「开始评分」起实时累加，含尚未点「启动」的搭线时间，暂停也照走。
     if (q.session_active) q.session_t += dt;
-    if (q.session_active && q.session_t >= HX_SCORE_DURATION_S) {
-        q.session_t = HX_SCORE_DURATION_SYS;
+    if (q.session_active && q.session_t >= HxScoreSessionDuration()) {
+        q.session_t = HxScoreSessionDuration();
         q.session_active = false;
         q.session_finished = true;
         q.session_just_end = true;
@@ -388,4 +400,3 @@ void HxScoreTick(const HxSystem* s, double dt) {
 
     update_report(s);
 }
-
